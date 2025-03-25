@@ -106,7 +106,6 @@ class PostgresDB:
 
 # Example Usage
 if __name__ == "__main__":
-    #db = PostgresDB("BabaVanga", "postgres", "admin", "localhost", "5433")
     db = PostgresDB(db_name, db_user, db_password, db_host, db_port)
     db.connect()
     db.close()
