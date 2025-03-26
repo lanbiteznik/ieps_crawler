@@ -116,12 +116,23 @@ class Database:
             cursor.close()
     
     def get_next_frontier_page(self):
-        """Get the next URL from the frontier"""
+        """Get the next URL from the frontier with improved duplicate checking"""
         cursor = self.conn.cursor()
         try:
-            cursor.execute(
-                "SELECT url FROM crawldb.page WHERE page_type_code = 'FRONTIER' ORDER BY id LIMIT 1"
-            )
+            # CRITICAL: Get a URL that hasn't been marked as VISITED yet
+            cursor.execute("""
+                SELECT p.url 
+                FROM crawldb.page p 
+                WHERE p.page_type_code = 'FRONTIER' 
+                AND p.url NOT IN (
+                    SELECT url 
+                    FROM crawldb.page 
+                    WHERE page_type_code != 'FRONTIER'
+                )
+                ORDER BY p.id 
+                LIMIT 1
+            """)
+            
             result = cursor.fetchone()
             if result:
                 return result[0]

@@ -431,6 +431,10 @@ class Crawler:
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
         
+        # At the beginning of your crawl_page method:
+        if self.skip_visited_url(url):
+            return  # Exit immediately if already visited
+
         # Process sitemap on the first page from each domain
         # Use a domain tracking set to avoid processing sitemaps repeatedly
         if not hasattr(self, 'processed_sitemap_domains'):
@@ -732,6 +736,33 @@ class Crawler:
             print(f"Marked {duplicate_url} as duplicate of {duplicate_original_url}")
         else:
             print(f"Duplicate detection failed")
+
+    def skip_visited_url(self, url):
+        """Check if URL has been visited and properly remove it from frontier if so"""
+        cursor = self.db.conn.cursor()
+        try:
+            # Check if this URL has been processed with any page_type other than FRONTIER
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM crawldb.page 
+                WHERE url = %s AND page_type_code != 'FRONTIER'
+            """, (url,))
+            
+            count = cursor.fetchone()[0]
+            if count > 0:
+                print(f"Skipping already visited URL: {url}")
+                
+                # CRITICAL: Remove from frontier if already visited
+                cursor.execute("""
+                    DELETE FROM crawldb.page
+                    WHERE url = %s AND page_type_code = 'FRONTIER'
+                """, (url,))
+                
+                self.db.conn.commit()
+                return True
+            return False
+        finally:
+            cursor.close()
 
 from database import Database
 
