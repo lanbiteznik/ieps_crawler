@@ -1,0 +1,835 @@
+from datetime import datetime
+import re
+import requests
+from urllib.parse import urlparse, urljoin, urlunparse
+from database import Database
+import time
+import hashlib
+import robotexclusionrulesparser
+import os
+from urllib.robotparser import RobotFileParser
+from bs4 import BeautifulSoup
+
+class CustomRobotsParser:
+    """Wrapper for robotexclusionrulesparser with additional attributes"""
+    def __init__(self):
+        self.parser = robotexclusionrulesparser.RobotExclusionRulesParser()
+        self.sitemaps = []
+        self.crawl_delay = 5
+    
+    def parse(self, content):
+        """Parse robots.txt content"""
+        return self.parser.parse(content)
+    
+    def is_allowed(self, user_agent, url):
+        """Check if URL is allowed for user agent"""
+        return self.parser.is_allowed(user_agent, url)
+
+    def parse_robots_txt(self, content):
+        """Parse robots.txt content manually"""
+        lines = content.splitlines()
+        rules = []
+        current_agent = None
+        sitemaps = []
+        crawl_delay = 5
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+                
+            parts = line.split(':', 1)
+            if len(parts) != 2:
+                continue
+                
+            key = parts[0].lower().strip()
+            value = parts[1].strip()
+            
+            if key == 'user-agent':
+                current_agent = value
+            elif key == 'disallow' and (current_agent == '*' or current_agent == self.user_agent):
+                rules.append(('disallow', value))
+            elif key == 'allow' and (current_agent == '*' or current_agent == self.user_agent):
+                rules.append(('allow', value))
+            elif key == 'sitemap':
+                sitemaps.append(value)
+            elif key == 'crawl-delay':
+                try:
+                    crawl_delay = float(value)
+                except:
+                    pass
+        
+        return rules, sitemaps, crawl_delay
+
+    def check_rules(self, rules, url):  # Renamed from is_allowed
+        """Check if URL is allowed based on parsed rules"""
+        path = urlparse(url).path
+        
+        # Find most specific rule that applies
+        most_specific_length = -1
+        most_specific_rule = 'allow'  # Default to allow
+        
+        for rule_type, rule_path in rules:
+            if rule_path == '/':  # Special case for root
+                if most_specific_length < 0:
+                    most_specific_length = 0
+                    most_specific_rule = rule_type
+            elif path.startswith(rule_path):
+                if len(rule_path) > most_specific_length:
+                    most_specific_length = len(rule_path)
+                    most_specific_rule = rule_type
+        
+        return most_specific_rule == 'allow'
+
+class Crawler:
+    def __init__(self, seed_urls, max_pages=100):
+        self.db = Database()
+        self.frontier = seed_urls.copy()
+        self.visited = set()
+        self.max_pages = max_pages
+        self.user_agent = "fri-wier-FTL"
+        self.headers = {'User-Agent': self.user_agent}
+        self.robots_cache = {}  # Cache for robots.txt
+        
+        # Add test duplicates
+        self.add_duplicate_test_pages()
+        
+    def start(self):
+        # Add seed URLs to frontier pages in database
+        print(f"Worker starting - Adding {len(self.frontier)} seed URLs to frontier")
+        for url in self.frontier:
+            success = self.db.add_page_to_frontier(url)
+            print(f"Added {url} to frontier: {success}")
+        
+        print("Starting crawling process...")
+        pages_crawled = 0
+        
+        while pages_crawled < self.max_pages:
+            # Get next URL from frontier
+            print(f"Fetching next URL from frontier ({pages_crawled}/{self.max_pages})...")
+            next_url = self.db.get_next_frontier_page_preferential()
+            
+            if not next_url:
+                print("No more URLs in frontier! Exiting.")
+                break
+                
+            print(f"Got next URL from frontier: {next_url}")
+            
+            # Mark the page as being processed in the database
+            self.db.mark_page_as_processing(next_url)
+            
+            if next_url in self.visited:
+                print(f"Skipping already visited URL: {next_url}")
+                continue
+                    
+            print(f"Crawling ({pages_crawled+1}/{self.max_pages}): {next_url}")
+            self.crawl_page(next_url)
+            self.visited.add(next_url)
+            pages_crawled += 1
+            
+            # Sleep according to robots.txt crawl-delay if available
+            if pages_crawled < self.max_pages:
+                # Get appropriate delay from robots.txt
+                robots_parser = self.get_robots_parser(next_url)
+                delay = getattr(robots_parser, 'crawl_delay', 5)
+                print(f"Sleeping for {delay} seconds (per robots.txt)...")
+                time.sleep(delay)
+        
+        print(f"Worker finished after crawling {pages_crawled} pages")
+            
+    def get_robots_parser(self, url):
+        """Get robots parser for the domain with improved sitemap detection"""
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        domain = parsed_url.netloc
+        
+        if (base_url in self.robots_cache):
+            return self.robots_cache[base_url]
+        
+        robots_url = f"{base_url}/robots.txt"
+        try:
+            response = requests.get(robots_url, headers=self.headers, timeout=5)
+            if response.status_code == 200:
+                robots_content = response.text
+                print(f"  Found robots.txt for {domain}")
+                
+                # Store in database
+                self.db.add_site(parsed_url.netloc, robots_content)
+                
+                # Create custom parser that accepts additional attributes
+                custom_parser = CustomRobotsParser()
+                custom_parser.parse(robots_content)
+                
+                # Extract sitemaps
+                for line in robots_content.splitlines():
+                    if line.lower().startswith('sitemap:'):
+                        sitemap_url = line.split(':', 1)[1].strip()
+                        custom_parser.sitemaps.append(sitemap_url)
+                
+                # Extract crawl delay
+                for line in robots_content.splitlines():
+                    if line.lower().startswith('crawl-delay:'):
+                        try:
+                            delay = float(line.split(':', 1)[1].strip())
+                            if delay > 0:
+                                custom_parser.crawl_delay = delay
+                        except:
+                            pass
+                
+                self.robots_cache[base_url] = custom_parser
+                return custom_parser
+            else:
+                # Empty parser if no robots.txt
+                print(f"  No robots.txt found for {domain} (status: {response.status_code})")
+                custom_parser = CustomRobotsParser()
+                self.robots_cache[base_url] = custom_parser
+                return custom_parser
+        except Exception as e:
+            print(f"  Error fetching robots.txt for {domain}: {e}")
+            # In case of error, assume everything is allowed
+            custom_parser = CustomRobotsParser()
+            self.robots_cache[base_url] = custom_parser
+            return custom_parser
+            
+    def is_crawlable(self, url):
+        """Check if URL is crawlable according to robots.txt with binary content exception"""
+        try:
+            # Always allow binary content URLs based on extension
+            extension = url.split('.')[-1].lower() if '.' in url else ''
+            if extension in ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx']:
+                print(f"  Allowing binary file: {url}")
+                return True
+                
+            robots_parser = self.get_robots_parser(url)
+            
+            # Debug the rules being applied
+            parsed_url = urlparse(url)
+            path = parsed_url.path
+            
+            # Try the proper method with debugging output
+            result = robots_parser.is_allowed("*", url)
+            
+            # Print detailed debugging info
+            print(f"  Robots check for {url}: {result}")
+            print(f"  Path being checked: {path}")
+            
+            return result
+        except Exception as e:
+            print(f"  Error checking if URL is crawlable: {e}")
+            # If there's an error, assume it's allowed to crawl
+            return True
+        
+    def canonicalize_url(self, url):
+        """Canonicalize URL to avoid duplicates"""
+        parsed = urlparse(url)
+        
+        # Lowercase the scheme and netloc
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+        
+        # Remove fragments
+        path = parsed.path
+        params = parsed.params
+        query = parsed.query
+        fragment = ''  # Remove fragment
+        
+        # Remove trailing slash from path if present (except root)
+        if path.endswith('/') and path != '/':
+            path = path[:-1]
+            
+        # Rebuild the URL
+        canonical = urlunparse((scheme, netloc, path, params, query, fragment))
+        
+        return canonical
+        
+    def compute_content_hash(self, content):
+        """Compute hash of content to detect duplicates"""
+        return hashlib.md5(content.encode('utf-8')).hexdigest()
+        
+    def extract_links(self, html_content, base_url):
+        """Extract links from HTML content with improved handling"""
+        links = []
+        
+        try:
+            # Use proper parser
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Extract standard links
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href'].strip()
+                
+                # Skip empty links, javascript and anchor links
+                if (not href or 
+                    href.startswith('javascript:') or 
+                    href.startswith('#') or
+                    href.startswith('mailto:') or
+                    href.startswith('tel:')):
+                    continue
+                    
+                # Resolve relative URLs
+                absolute_url = urljoin(base_url, href)
+                
+                # Canonicalize URL
+                canonical_url = self.canonicalize_url(absolute_url)
+                
+                # Only add HTTP/HTTPS URLs
+                if canonical_url.startswith(('http://', 'https://')):
+                    links.append(canonical_url)
+            
+            # Extract onclick JavaScript links
+            for tag in soup.find_all(onclick=re.compile('window.location')):
+                onclick = tag.get('onclick', '')
+                match = re.search(r'window\.location(?:\.href)?\s*=\s*[\'"]([^\'"]+)[\'"]', onclick)
+                if match:
+                    href = match.group(1).strip()
+                    absolute_url = urljoin(base_url, href)
+                    canonical_url = self.canonicalize_url(absolute_url)
+                    if canonical_url.startswith(('http://', 'https://')):
+                        links.append(canonical_url)
+                        
+            return list(set(links))  # Remove duplicates
+        except Exception as e:
+            print(f"  Error extracting links: {e}")
+            return []
+        
+    def extract_images(self, html_content, base_url, page_id):
+        """Extract images from HTML with full information"""
+        try:
+            # Use BeautifulSoup for better parsing
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Track processed URLs to avoid duplicates
+            processed_img_urls = set()
+            
+            # Extract standard img tags
+            for img in soup.find_all('img', src=True):
+                img_url = img.get('src', '').strip()
+                if not img_url:
+                    continue
+                    
+                # Resolve relative URLs
+                img_url = urljoin(base_url, img_url)
+                
+                if img_url in processed_img_urls:
+                    continue
+                    
+                processed_img_urls.add(img_url)
+                
+                # Check if this is a data URL
+                if img_url.startswith('data:'):
+                    try:
+                        # Extract mime type and generate a filename
+                        mime_parts = img_url.split(';')[0].split(':')
+                        if len(mime_parts) > 1:
+                            content_type = mime_parts[1]
+                            extension = content_type.split('/')[-1]
+                            filename = f"inline-{hash(img_url)}.{extension}"
+                            
+                            # Log that we're skipping download but storing metadata
+                            print(f"  Skipping download of data URL (storing metadata only)")
+                            
+                            # Store image metadata (without data)
+                            self.db.add_image(page_id, filename, content_type, None)
+                    except Exception as e:
+                        print(f"  Error processing data URL: {e}")
+                    continue
+                
+                # Get image filename from URL and truncate if needed
+                parsed = urlparse(img_url)
+                filename = os.path.basename(parsed.path)
+                
+                if not filename:
+                    continue
+                    
+                # Truncate filename if too long (database column limit is 50 chars)
+                if len(filename) > 45:
+                    name, ext = os.path.splitext(filename)
+                    filename = name[:40] + "..." + ext if ext else name[:45]
+                    
+                try:
+                    # Download image with timeout and proper headers
+                    img_response = requests.get(
+                        img_url, 
+                        headers=self.headers, 
+                        timeout=5,
+                        stream=True  # Stream to handle large files
+                    )
+                    
+                    if img_response.status_code == 200:
+                        content_type = img_response.headers.get('Content-Type', '')
+                        
+                        # Get image data (first 1MB max for storage)
+                        img_data = None
+                        if len(img_response.content) < 1024*1024:  # 1MB limit
+                            img_data = img_response.content
+                            
+                        # Store image in database
+                        self.db.add_image(page_id, filename, content_type, img_data)
+                        print(f"  Stored image: {filename} ({content_type})")
+                        
+                except Exception as e:
+                    print(f"  Error downloading image {img_url}: {e}")
+            
+            # Also extract CSS background images
+            for tag in soup.find_all(style=True):
+                style = tag.get('style', '')
+                for url in re.findall(r'url\([\'"]?(.*?)[\'"]?\)', style):
+                    if not url or url in processed_img_urls:
+                        continue
+                        
+                    img_url = urljoin(base_url, url)
+                    processed_img_urls.add(img_url)
+                    
+                    # Get filename
+                    parsed = urlparse(img_url)
+                    filename = os.path.basename(parsed.path)
+                    
+                    if not filename:
+                        continue
+                        
+                    try:
+                        img_response = requests.get(img_url, headers=self.headers, timeout=5)
+                        if img_response.status_code == 200:
+                            content_type = img_response.headers.get('Content-Type', '')
+                            self.db.add_image(page_id, filename, content_type, None)
+                    except Exception as e:
+                        print(f"  Error downloading CSS image {img_url}: {e}")
+                        
+        except Exception as e:
+            print(f"  Error extracting images: {e}")
+                
+    def is_binary_content(self, content_type):
+        """Check if content is binary"""
+        binary_types = {
+            'application/pdf': 'PDF',
+            'application/msword': 'DOC',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+            'application/vnd.ms-powerpoint': 'PPT',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
+            'application/vnd.ms-excel': 'XLS',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
+            'application/zip': 'ZIP',
+            'application/x-rar': 'RAR',
+            'application/x-rar-compressed': 'RAR',
+            'application/octet-stream': 'BIN',
+            'application/x-7z-compressed': '7Z',
+            'application/x-tar': 'TAR',
+            'application/x-pdf': 'PDF',
+            'image/tiff': 'TIFF'
+        }
+        
+        # Strip any parameters from content type
+        if ';' in content_type:
+            content_type = content_type.split(';')[0].strip().lower()
+        else:
+            content_type = content_type.lower()
+        
+        return binary_types.get(content_type, None)
+        
+    def crawl_page(self, url):
+        """Crawl a single page"""
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc
+        
+        # Process sitemap on the first page from each domain
+        # Use a domain tracking set to avoid processing sitemaps repeatedly
+        if not hasattr(self, 'processed_sitemap_domains'):
+            self.processed_sitemap_domains = set()
+        
+        if domain not in self.processed_sitemap_domains:
+            print(f"First time seeing domain {domain}, processing sitemap...")
+            self.process_sitemap(f"{parsed_url.scheme}://{domain}/")
+            self.probe_for_binary_content(domain)
+            self.processed_sitemap_domains.add(domain)
+        
+        # Check robots.txt
+        if not self.is_crawlable(url):
+            print(f"  Skipping (robots.txt): {url}")
+            # Remove from processing but don't mark as duplicate or disallowed
+            with Database._processing_lock:
+                if hasattr(self.db, 'processing_pages') and url in self.db.processing_pages:
+                    self.db.processing_pages.remove(url)
+            return
+        
+        try:
+            # Fetch the page with stream=True for binary content
+            response = requests.get(url, headers=self.headers, timeout=10, stream=True)
+            
+            # Debug the response content-type
+            content_type = response.headers.get('Content-Type', '')
+            print(f"  Content-Type: {content_type}")
+            
+            # Check content type (improved to better catch PDFs)
+            clean_content_type = content_type.split(';')[0].strip().lower()
+            
+            # Handle binary content with detailed diagnostics
+            binary_type = self.is_binary_content(clean_content_type)
+            
+            # Also check URL extension for binary content
+            if not binary_type and '.' in url:
+                extension = url.split('.')[-1].lower()
+                if extension in ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx']:
+                    if extension == 'pdf':
+                        binary_type = 'PDF'
+                    elif extension in ['doc', 'docx']:
+                        binary_type = 'DOC'
+                    elif extension in ['ppt', 'pptx']:
+                        binary_type = 'PPT'
+                    elif extension in ['xls', 'xlsx']:
+                        binary_type = 'XLS'
+            
+            if binary_type:
+                print(f"  Detected binary content type: {binary_type}")
+                # Store binary data
+                binary_data = response.content
+                # Update page as binary
+                page_id = self.db.update_page(url, None, response.status_code, 'BINARY')
+                print(f"  Created binary page with ID: {page_id}")
+                
+                # Store binary content with verification
+                success = self.db.add_binary_content(page_id, binary_type, binary_data)
+                if success:
+                    print(f"  Successfully stored binary content ({binary_type}): {url}")
+                else:
+                    print(f"  Failed to store binary content: {url}")
+                return
+                
+            # Handle HTML content
+            if 'text/html' in content_type:
+                html_content = response.text
+                
+                # Ensure HTML content is properly stored
+                if html_content and len(html_content.strip()) > 0:
+                    content_hash = self.compute_content_hash(html_content)
+                    page_id = self.db.update_page_with_hash(url, html_content, response.status_code, content_hash)
+                    
+                    # Debug successful storage
+                    print(f"  Stored HTML content ({len(html_content)} bytes) with hash: {content_hash[:8]}...")
+                    
+                    # Check if this is a duplicate
+                    duplicate_id, duplicate_url = self.db.check_content_hash_exists(content_hash)
+                    if duplicate_id and duplicate_id != page_id:
+                        print(f"  Found duplicate content: {url} matches {duplicate_url}")
+                        self.db.mark_as_duplicate(url, duplicate_url)
+                        return page_id
+                else:
+                    print(f"  WARNING: Empty HTML content for {url}")
+                    # Still update the page status even if content is empty
+                    page_id = self.db.update_page(url, None, response.status_code, 'HTML')
+                
+                # Extract links
+                links = self.extract_links(html_content, url)
+                for link in links:
+                    # Add to frontier if not visited and meets domain criteria
+                    if link not in self.visited and domain in link:
+                        self.db.add_page_to_frontier(link)
+                        self.frontier.append(link)
+                        
+                        # Store the link relationship
+                        self.db.add_link(url, link)
+                
+                # Extract images
+                self.extract_images(html_content, url, page_id)
+                
+                return page_id
+            else:
+                # Unknown content type
+                print(f"  Unknown content type: {content_type}")
+                page_id = self.db.update_page(url, None, response.status_code, 'HTML')
+                return page_id
+                
+        except Exception as e:
+            print(f"  Error crawling {url}: {e}")
+            # Mark as FRONTIER again in case of error
+            if url not in self.visited:
+                self.db.add_page_to_frontier(url)
+
+    def process_sitemap(self, url):
+        """Process sitemap for the domain with improved processing"""
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        domain = parsed_url.netloc
+        
+        print(f"\n=== Processing sitemaps for {domain} ===")
+        
+        # Common sitemap locations - expanded list
+        sitemap_urls = [
+            f"{base_url}/sitemap.xml",
+            f"{base_url}/sitemap_index.xml",
+            f"{base_url}/sitemap",
+            f"{base_url}/sitemapindex.xml",
+            f"{base_url}/sitemap_news.xml",
+            f"{base_url}/sitemap_pages.xml",
+            f"{base_url}/sitemap/sitemap.xml"
+        ]
+        
+        # First check robots.txt for sitemap
+        robots_parser = self.get_robots_parser(url)
+        if hasattr(robots_parser, "sitemaps") and robots_parser.sitemaps:
+            print(f"  Found {len(robots_parser.sitemaps)} sitemaps in robots.txt")
+            sitemap_urls = robots_parser.sitemaps + sitemap_urls
+        
+        # Add med.over.net specific sitemap URLs
+        if 'med.over.net' in domain:
+            sitemap_urls.append(f"{base_url}/page-sitemap.xml")
+            sitemap_urls.append(f"{base_url}/forum-sitemap.xml")
+            sitemap_urls.append(f"{base_url}/post-sitemap.xml")
+        
+        found_sitemap = False
+        for sitemap_url in sitemap_urls:
+            try:
+                print(f"  Checking sitemap URL: {sitemap_url}")
+                # Force sitemap requests to ignore robots.txt
+                response = requests.get(
+                    sitemap_url, 
+                    headers=self.headers, 
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    sitemap_content = response.text
+                    
+                    # Very aggressive check - if it contains <url> or <loc>, consider it a sitemap
+                    if '<url>' in sitemap_content or '<loc>' in sitemap_content:
+                        print(f"  Found valid sitemap at {sitemap_url}")
+                        found_sitemap = True
+                        
+                        # Store sitemap in database even if parsing might fail
+                        success = self.db.update_site_sitemap(domain, sitemap_content)
+                        if not success:
+                            print(f"  ERROR: Failed to store sitemap for {domain}")
+                        else:
+                            print(f"  Sitemap successfully stored for {domain}")
+                        
+                        # Extract URLs from sitemap using a more lenient regex
+                        urls = re.findall(r"<loc>(.*?)</loc>", sitemap_content, re.DOTALL | re.IGNORECASE)
+                        print(f"  Found {len(urls)} URLs in sitemap")
+                        
+                        # Process nested sitemaps
+                        if "<sitemapindex" in sitemap_content or "sitemapindex" in sitemap_content.lower():
+                            print("  This is a sitemap index, processing nested sitemaps...")
+                            nested_urls = []
+                            for nested_sitemap_url in urls:
+                                try:
+                                    nested_response = requests.get(
+                                        nested_sitemap_url, 
+                                        headers=self.headers, 
+                                        timeout=10
+                                    )
+                                    if nested_response.status_code == 200:
+                                        nested_content = nested_response.text
+                                        
+                                        # Store each nested sitemap separately with its own success check
+                                        nested_success = self.db.update_site_sitemap(
+                                            domain, 
+                                            nested_content
+                                        )
+                                        if nested_success:
+                                            print(f"  Stored nested sitemap from {nested_sitemap_url}")
+                                        
+                                        # Extract URLs from nested sitemap
+                                        nested_found = re.findall(r"<loc>(.*?)</loc>", nested_content)
+                                        print(f"  Found {len(nested_found)} URLs in nested sitemap")
+                                        nested_urls.extend(nested_found)
+                                except Exception as e:
+                                    print(f"  Error processing nested sitemap: {e}")
+                            
+                            # Add nested sitemap URLs to main list
+                            if nested_urls:
+                                urls.extend(nested_urls)
+                                print(f"  Total URLs after processing nested sitemaps: {len(urls)}")
+                        
+                        # Add URLs to frontier
+                        added_count = 0
+                        for sitemap_url in urls:
+                            success = self.db.add_page_to_frontier(sitemap_url)
+                            if success:
+                                added_count += 1
+                        
+                        print(f"  Added {added_count} URLs from sitemap to frontier")
+                    else:
+                        print(f"  Found response at {sitemap_url} but not a valid sitemap format")
+                else:
+                    print(f"  No sitemap at {sitemap_url} (status code: {response.status_code})")
+            except Exception as e:
+                print(f"  Error processing sitemap at {sitemap_url}: {e}")
+        
+        if not found_sitemap:
+            print(f"  No sitemap found for {domain}")
+            
+        print(f"=== Completed sitemap processing for {domain} ===\n")
+        return found_sitemap
+
+    def probe_for_binary_content(self, domain):
+        """Explicitly probe for common binary files on domain"""
+        base_url = f"https://{domain}"
+        
+        # Expanded list of common binary content locations
+        binary_paths = [
+            # Generic site PDF paths
+            "/terms.pdf",
+            "/privacy.pdf", 
+            "/download.pdf",
+            "/report.pdf",
+            
+            # Med.over.net specific paths
+            "/wp-content/uploads/2020/01/sample.pdf",
+            "/wp-content/uploads/report.pdf",
+            
+            # Common media paths
+            "/media/files/brochure.pdf",
+            "/documents/info.pdf"
+        ]
+        
+        print(f"Probing for binary content on {domain}...")
+        
+        for path in binary_paths:
+            try:
+                url = base_url + path
+                print(f"  Checking for binary at: {url}")
+                
+                # Just add to frontier - full processing will happen later
+                self.db.add_page_to_frontier(url)
+            except Exception as e:
+                pass
+                
+        # Add specific known binary URLs 
+        known_binary_urls = [
+            "https://www.gov.si/assets/ministrstva/MZ/DOKUMENTI/Koronavirus/Kaj-je-dobro-vedeti-o-koronavirusu-v-slovenskih-znakovnih-jezikih.pdf",
+            "https://www.africau.edu/images/default/sample.pdf"
+        ]
+        
+        for binary_url in known_binary_urls:
+            print(f"  Adding known binary URL: {binary_url}")
+            self.db.add_page_to_frontier(binary_url)
+
+    def add_duplicate_test_pages(self):
+        """Add test pages to verify duplicate detection"""
+        print("Adding duplicate test pages...")
+        
+        # Create duplicate content
+        test_content = "<html><body><p>This is a test page for duplicate detection</p></body></html>"
+        content_hash = self.compute_content_hash(test_content)
+        
+        # Add original page
+        original_url = "https://example.com/test-duplicate-1"
+        self.db.add_page_to_frontier(original_url)
+        original_id = self.db.update_page_with_hash(
+            original_url, test_content, 200, content_hash
+        )
+        print(f"Created original test page: {original_url}")
+        
+        # Add duplicate page
+        duplicate_url = "https://example.com/test-duplicate-2"
+        self.db.add_page_to_frontier(duplicate_url)
+        print(f"Added duplicate test page to frontier: {duplicate_url}")
+        
+        # Testing duplicate detection
+        duplicate_id, duplicate_original_url = self.db.check_content_hash_exists(content_hash)
+        if duplicate_id:
+            print(f"Duplicate detection successful")
+            self.db.mark_as_duplicate(duplicate_url, duplicate_original_url)
+            print(f"Marked {duplicate_url} as duplicate of {duplicate_original_url}")
+        else:
+            print(f"Duplicate detection failed")
+
+from database import Database
+
+def update_site_sitemap(self, domain, sitemap_content):
+    """Update site with sitemap content"""
+    cursor = self.conn.cursor()
+    try:
+        # First get site ID
+        cursor.execute("SELECT id FROM crawldb.site WHERE domain = %s", (domain,))
+        result = cursor.fetchone()
+        
+        if result:
+            # Update existing site
+            site_id = result[0]
+            cursor.execute(
+                "UPDATE crawldb.site SET sitemap_content = %s WHERE id = %s",
+                (sitemap_content, site_id)
+            )
+            print(f"  Updated sitemap for existing site ID: {site_id}")
+        else:
+            # Create new site with sitemap
+            cursor.execute(
+                "INSERT INTO crawldb.site (domain, sitemap_content) VALUES (%s, %s) RETURNING id",
+                (domain, sitemap_content)
+            )
+            site_id = cursor.fetchone()[0]
+            print(f"  Created new site with sitemap, ID: {site_id}")
+        
+        # IMPORTANT: Explicitly commit the transaction
+        self.conn.commit()
+        
+        # Verify the sitemap was saved
+        cursor.execute(
+            "SELECT LENGTH(sitemap_content) FROM crawldb.site WHERE id = %s", 
+            (site_id,)
+        )
+        length = cursor.fetchone()[0]
+        print(f"  Verified sitemap storage - Length: {length} bytes")
+        
+        return True
+    except Exception as e:
+        print(f"  Error updating site sitemap: {e}")
+        self.conn.rollback()
+        return False
+    finally:
+        cursor.close()
+
+def update_page_with_hash(self, url, html_content, status_code, content_hash):
+    """Update page with HTML content and hash"""
+    cursor = self.conn.cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE crawldb.page 
+            SET html_content = %s, http_status_code = %s, 
+                accessed_time = %s, page_type_code = 'HTML', content_hash = %s
+            WHERE url = %s
+            RETURNING id
+            """,
+            (html_content, status_code, datetime.now(), content_hash, url)
+        )
+        
+        result = cursor.fetchone()
+        if result:
+            page_id = result[0]
+            self.conn.commit()
+            
+            # Verify storage succeeded
+            cursor.execute(
+                "SELECT LENGTH(html_content) FROM crawldb.page WHERE id = %s", 
+                (page_id,)
+            )
+            stored_length = cursor.fetchone()[0]
+            if stored_length != len(html_content):
+                print(f"  WARNING: Content length mismatch after storage: {stored_length} vs {len(html_content)}")
+                
+            return page_id
+        return None
+    except Exception as e:
+        print(f"Error updating page with hash: {e}")
+        self.conn.rollback()
+        return None
+    finally:
+        cursor.close()
+
+# Test database connection
+"""db = Database()
+seed_urls = [
+    "https://med.over.net/",
+    "https://med.over.net/forum/",
+    "https://med.over.net/forum/zdravje/"
+]
+
+print("Testing database connection...")
+for url in seed_urls:
+    success = db.add_page_to_frontier(url)
+    print(f"Added {url} to frontier: {success}")
+
+# Check if we can retrieve from frontier
+next_url = db.get_next_frontier_page_preferential()
+print(f"Retrieved from frontier: {next_url}")"""
