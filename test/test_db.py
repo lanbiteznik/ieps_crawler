@@ -242,28 +242,34 @@ def test_real_world_extraction():
         
         # Test different content types with stable websites
         test_cases = [
+            # HTML page - FRI website
+            {
+                "url": "https://www.fri.uni-lj.si/",
+                "description": "FRI homepage (standard HTML)",
+                "expected_type": "HTML"
+            },
             # HTML page with many links
             {
                 "url": "https://en.wikipedia.org/wiki/Web_crawler",
                 "description": "Wikipedia page (rich HTML with many links)",
                 "expected_type": "HTML"
             },
-            # Image-heavy page
+            # Forum page with multiple sections
             {
-                "url": "https://www.nasa.gov/images/",
-                "description": "NASA image gallery (image-heavy page)",
+                "url": "https://med.over.net/forum/",
+                "description": "Med.over.net forum (rich content structure)",
                 "expected_type": "HTML"
             },
-            # Binary PDF content
+            # Binary PDF content - stable sample PDF
             {
-                "url": "https://s28.q4cdn.com/392171258/files/doc_downloads/test.pdf",
-                "description": "W3C sample PDF file (binary content)",
+                "url": "https://www.africau.edu/images/default/sample.pdf",
+                "description": "Sample PDF file (binary content)",
                 "expected_type": "BINARY"
             },
-            # JavaScript-heavy page
+            # Image-heavy page
             {
-                "url": "https://github.com/",
-                "description": "GitHub homepage (JavaScript-heavy)",
+                "url": "https://www.fri.uni-lj.si/sl/galerija",
+                "description": "FRI gallery (image-heavy page)",
                 "expected_type": "HTML"
             }
         ]
@@ -408,8 +414,69 @@ def test_real_world_extraction():
     except Exception as e:
         print(f"Error during real-world testing: {e}")
 
+def test_duplicate_detection():
+    """Test dedicated to duplicate content detection"""
+    try:
+        print("\n===== TESTING DUPLICATE DETECTION =====\n")
+        
+        db = Database()
+        crawler = Crawler(["https://example.com"], max_pages=1)
+        
+        # Create unique test content
+        unique_content = f"<html><body>Unique test content {time.time()}</body></html>"
+        content_hash = crawler.compute_content_hash(unique_content)
+        
+        # Use temporary test URLs that won't conflict with real sites
+        url1 = f"https://test-{int(time.time())}-1.example.com/"
+        url2 = f"https://test-{int(time.time())}-2.example.com/"
+        
+        print(f"Test URL 1: {url1}")
+        print(f"Test URL 2: {url2}")
+        
+        # Add to frontier and create first page
+        db.add_page_to_frontier(url1)
+        page_id1 = db.update_page_with_hash(url1, unique_content, 200, content_hash)
+        print(f"Created first page with hash: {content_hash}")
+        
+        # Check for duplicate
+        db.add_page_to_frontier(url2)
+        duplicate_id, duplicate_url = db.check_content_hash_exists(content_hash)
+        
+        if duplicate_id and duplicate_url == url1:
+            print("✅ Duplicate detection successful")
+            # Mark as duplicate
+            success = db.mark_as_duplicate(url2, url1)
+            print(f"Marked as duplicate: {success}")
+            
+            # Verify in database
+            cursor = db.conn.cursor()
+            cursor.execute(
+                "SELECT duplicate_id FROM crawldb.page WHERE url = %s", 
+                (url2,)
+            )
+            result = cursor.fetchone()
+            if result and result[0] == page_id1:
+                print("✅ Database successfully updated with duplicate relationship")
+            else:
+                print("❌ Database duplicate relationship not set correctly")
+            cursor.close()
+        else:
+            print("❌ Duplicate detection failed")
+        
+        # Clean up test data
+        cursor = db.conn.cursor()
+        cursor.execute("DELETE FROM crawldb.page WHERE url IN (%s, %s)", (url1, url2))
+        db.conn.commit()
+        cursor.close()
+        
+        print("\n===== DUPLICATE DETECTION TEST COMPLETED =====\n")
+        
+    except Exception as e:
+        print(f"Error during duplicate detection testing: {e}")
+
 if __name__ == "__main__":
     # Comment out these if you only want to run the real-world test
     # test_database_operations()
     # test_crawler_extraction()
     test_real_world_extraction()
+    test_duplicate_detection()

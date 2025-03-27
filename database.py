@@ -144,56 +144,20 @@ class Database:
         """Get next page from frontier with preference for certain URL patterns"""
         cursor = self.conn.cursor()
         try:
-            # Target med.over.net forum sections with highest priority
-            priority_patterns = [
-                '%/forum/zdravje/%',
-                '%/forum/nosecnost-in-otroci/%', 
-                '%/forum/dusevno-zdravje/%'
-            ]
-            
-            # Try each priority pattern
-            for pattern in priority_patterns:
-                cursor.execute("""
-                    SELECT url FROM crawldb.page 
-                    WHERE page_type_code = 'FRONTIER' 
-                    AND url LIKE %s
-                    LIMIT 1
-                """, (pattern,))
-                result = cursor.fetchone()
-                if result:
-                    return result[0]
-            
-            # If no priority URLs found, try general med.over.net forum section
+            # Try any frontier page
             cursor.execute("""
                 SELECT url FROM crawldb.page 
-                WHERE page_type_code = 'FRONTIER' 
-                AND url LIKE '%/forum/%' 
+                WHERE page_type_code = 'FRONTIER'
+                AND url NOT LIKE '%sitemap%.xml%'
+                AND url NOT LIKE '%/assets/sitemap/%'
                 LIMIT 1
             """)
             result = cursor.fetchone()
-            if result:
-                return result[0]
-                
-            # If still no match, get any med.over.net page
-            cursor.execute("""
-                SELECT url FROM crawldb.page 
-                WHERE page_type_code = 'FRONTIER' 
-                AND url LIKE 'https://med.over.net%' 
-                LIMIT 1
-            """)
-            result = cursor.fetchone()
-            if result:
-                return result[0]
-                
-            # Finally, try any frontier page
-            cursor.execute("""
-                SELECT url FROM crawldb.page 
-                WHERE page_type_code = 'FRONTIER' 
-                LIMIT 1
-            """)
-            result = cursor.fetchone()
+            # CRITICAL FIX: Handle None result safely
             return result[0] if result else None
-            
+        except Exception as e:
+            print(f"Database error getting frontier page: {e}")
+            return None
         finally:
             cursor.close()
     
@@ -215,26 +179,30 @@ class Database:
         finally:
             cursor.close()
     
-    def update_page_with_hash(self, url, html_content, http_status, content_hash):
-        """Update a page with content hash"""
+    def update_page_with_hash(self, url, html_content, status_code, content_hash):
+        """Update page with HTML content and hash"""
         cursor = self.conn.cursor()
         try:
             cursor.execute(
                 """
                 UPDATE crawldb.page 
-                SET html_content = %s, 
-                    http_status_code = %s, 
-                    page_type_code = 'HTML', 
-                    accessed_time = %s,
-                    content_hash = %s
+                SET html_content = %s, http_status_code = %s, 
+                    accessed_time = %s, page_type_code = 'HTML', content_hash = %s
                 WHERE url = %s
                 RETURNING id
                 """,
-                (html_content, http_status, datetime.now(), content_hash, url)
+                (html_content, status_code, datetime.now(), content_hash, url)
             )
+            
             result = cursor.fetchone()
             if result:
-                return result[0]
+                page_id = result[0]
+                self.conn.commit()
+                return page_id
+            return None
+        except Exception as e:
+            print(f"Error updating page with hash: {e}")
+            self.conn.rollback()
             return None
         finally:
             cursor.close()
@@ -349,22 +317,35 @@ class Database:
             
             if result:
                 # Update existing site
+                site_id = result[0]
                 cursor.execute(
                     "UPDATE crawldb.site SET sitemap_content = %s WHERE id = %s",
-                    (sitemap_content, result[0])
+                    (sitemap_content, site_id)
                 )
+                print(f"  Updated sitemap for existing site ID: {site_id}")
             else:
-                # Create new site
+                # Create new site with sitemap
                 cursor.execute(
-                    "INSERT INTO crawldb.site (domain, sitemap_content) VALUES (%s, %s)",
+                    "INSERT INTO crawldb.site (domain, sitemap_content) VALUES (%s, %s) RETURNING id",
                     (domain, sitemap_content)
                 )
+                site_id = cursor.fetchone()[0]
+                print(f"  Created new site with sitemap, ID: {site_id}")
             
-            # Explicitly commit the transaction
+            # IMPORTANT: Explicitly commit the transaction
             self.conn.commit()
+            
+            # Verify the sitemap was saved
+            cursor.execute(
+                "SELECT LENGTH(sitemap_content) FROM crawldb.site WHERE id = %s", 
+                (site_id,)
+            )
+            length = cursor.fetchone()[0]
+            print(f"  Verified sitemap storage - Length: {length} bytes")
+            
             return True
         except Exception as e:
-            print(f"Error updating site sitemap: {e}")
+            print(f"  Error updating site sitemap: {e}")
             self.conn.rollback()
             return False
         finally:
@@ -413,5 +394,28 @@ class Database:
         except Exception as e:
             print(f"Error marking page as processed: {e}")
             return False
+        finally:
+            cursor.close()
+    
+    def remove_sitemap_urls_from_frontier(self):
+        """Remove sitemap files from frontier to prevent loops"""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                DELETE FROM crawldb.page 
+                WHERE page_type_code = 'FRONTIER'
+                AND (
+                    url LIKE '%sitemap%.xml%' OR
+                    url LIKE '%/assets/sitemap/%'
+                )
+            """)
+            deleted = cursor.rowcount
+            self.conn.commit()
+            print(f"Removed {deleted} sitemap URLs from frontier to prevent loops")
+            return deleted
+        except Exception as e:
+            print(f"Error removing sitemap URLs: {e}")
+            self.conn.rollback()
+            return 0
         finally:
             cursor.close()

@@ -91,18 +91,21 @@ class Crawler:
         self.headers = {'User-Agent': self.user_agent}
         self.robots_cache = {}  # Cache for robots.txt
         
-        # Add test duplicates
-        self.add_duplicate_test_pages()
-        
     def start(self):
         # Add seed URLs to frontier pages in database
         print(f"Worker starting - Adding {len(self.frontier)} seed URLs to frontier")
+        
+        # Remove sitemap URLs that might cause infinite loops
+        if hasattr(self.db, 'remove_sitemap_urls_from_frontier'):
+            self.db.remove_sitemap_urls_from_frontier()
+        
         for url in self.frontier:
             success = self.db.add_page_to_frontier(url)
             print(f"Added {url} to frontier: {success}")
         
         print("Starting crawling process...")
         pages_crawled = 0
+        empty_frontier_count = 0  # Track consecutive empty frontier results
         
         while pages_crawled < self.max_pages:
             # Get next URL from frontier
@@ -110,9 +113,18 @@ class Crawler:
             next_url = self.db.get_next_frontier_page_preferential()
             
             if not next_url:
-                print("No more URLs in frontier! Exiting.")
-                break
+                empty_frontier_count += 1
+                print(f"No URLs in frontier! Attempt {empty_frontier_count}/5")
+                if empty_frontier_count >= 5:
+                    print("No more URLs in frontier after 5 attempts! Exiting.")
+                    break
+                # Sleep briefly before trying again
+                time.sleep(5)
+                continue
                 
+            # Reset counter when we get a URL
+            empty_frontier_count = 0
+            
             print(f"Got next URL from frontier: {next_url}")
             
             # Mark the page as being processed in the database
@@ -697,45 +709,6 @@ class Crawler:
             except Exception as e:
                 pass
                 
-        # Add specific known binary URLs 
-        known_binary_urls = [
-            "https://www.gov.si/assets/ministrstva/MZ/DOKUMENTI/Koronavirus/Kaj-je-dobro-vedeti-o-koronavirusu-v-slovenskih-znakovnih-jezikih.pdf",
-            "https://www.africau.edu/images/default/sample.pdf"
-        ]
-        
-        for binary_url in known_binary_urls:
-            print(f"  Adding known binary URL: {binary_url}")
-            self.db.add_page_to_frontier(binary_url)
-
-    def add_duplicate_test_pages(self):
-        """Add test pages to verify duplicate detection"""
-        print("Adding duplicate test pages...")
-        
-        # Create duplicate content
-        test_content = "<html><body><p>This is a test page for duplicate detection</p></body></html>"
-        content_hash = self.compute_content_hash(test_content)
-        
-        # Add original page
-        original_url = "https://example.com/test-duplicate-1"
-        self.db.add_page_to_frontier(original_url)
-        original_id = self.db.update_page_with_hash(
-            original_url, test_content, 200, content_hash
-        )
-        print(f"Created original test page: {original_url}")
-        
-        # Add duplicate page
-        duplicate_url = "https://example.com/test-duplicate-2"
-        self.db.add_page_to_frontier(duplicate_url)
-        print(f"Added duplicate test page to frontier: {duplicate_url}")
-        
-        # Testing duplicate detection
-        duplicate_id, duplicate_original_url = self.db.check_content_hash_exists(content_hash)
-        if duplicate_id:
-            print(f"Duplicate detection successful")
-            self.db.mark_as_duplicate(duplicate_url, duplicate_original_url)
-            print(f"Marked {duplicate_url} as duplicate of {duplicate_original_url}")
-        else:
-            print(f"Duplicate detection failed")
 
     def skip_visited_url(self, url):
         """Check if URL has been visited and properly remove it from frontier if so"""
@@ -763,104 +736,3 @@ class Crawler:
             return False
         finally:
             cursor.close()
-
-from database import Database
-
-def update_site_sitemap(self, domain, sitemap_content):
-    """Update site with sitemap content"""
-    cursor = self.conn.cursor()
-    try:
-        # First get site ID
-        cursor.execute("SELECT id FROM crawldb.site WHERE domain = %s", (domain,))
-        result = cursor.fetchone()
-        
-        if result:
-            # Update existing site
-            site_id = result[0]
-            cursor.execute(
-                "UPDATE crawldb.site SET sitemap_content = %s WHERE id = %s",
-                (sitemap_content, site_id)
-            )
-            print(f"  Updated sitemap for existing site ID: {site_id}")
-        else:
-            # Create new site with sitemap
-            cursor.execute(
-                "INSERT INTO crawldb.site (domain, sitemap_content) VALUES (%s, %s) RETURNING id",
-                (domain, sitemap_content)
-            )
-            site_id = cursor.fetchone()[0]
-            print(f"  Created new site with sitemap, ID: {site_id}")
-        
-        # IMPORTANT: Explicitly commit the transaction
-        self.conn.commit()
-        
-        # Verify the sitemap was saved
-        cursor.execute(
-            "SELECT LENGTH(sitemap_content) FROM crawldb.site WHERE id = %s", 
-            (site_id,)
-        )
-        length = cursor.fetchone()[0]
-        print(f"  Verified sitemap storage - Length: {length} bytes")
-        
-        return True
-    except Exception as e:
-        print(f"  Error updating site sitemap: {e}")
-        self.conn.rollback()
-        return False
-    finally:
-        cursor.close()
-
-def update_page_with_hash(self, url, html_content, status_code, content_hash):
-    """Update page with HTML content and hash"""
-    cursor = self.conn.cursor()
-    try:
-        cursor.execute(
-            """
-            UPDATE crawldb.page 
-            SET html_content = %s, http_status_code = %s, 
-                accessed_time = %s, page_type_code = 'HTML', content_hash = %s
-            WHERE url = %s
-            RETURNING id
-            """,
-            (html_content, status_code, datetime.now(), content_hash, url)
-        )
-        
-        result = cursor.fetchone()
-        if result:
-            page_id = result[0]
-            self.conn.commit()
-            
-            # Verify storage succeeded
-            cursor.execute(
-                "SELECT LENGTH(html_content) FROM crawldb.page WHERE id = %s", 
-                (page_id,)
-            )
-            stored_length = cursor.fetchone()[0]
-            if stored_length != len(html_content):
-                print(f"  WARNING: Content length mismatch after storage: {stored_length} vs {len(html_content)}")
-                
-            return page_id
-        return None
-    except Exception as e:
-        print(f"Error updating page with hash: {e}")
-        self.conn.rollback()
-        return None
-    finally:
-        cursor.close()
-
-# Test database connection
-"""db = Database()
-seed_urls = [
-    "https://med.over.net/",
-    "https://med.over.net/forum/",
-    "https://med.over.net/forum/zdravje/"
-]
-
-print("Testing database connection...")
-for url in seed_urls:
-    success = db.add_page_to_frontier(url)
-    print(f"Added {url} to frontier: {success}")
-
-# Check if we can retrieve from frontier
-next_url = db.get_next_frontier_page_preferential()
-print(f"Retrieved from frontier: {next_url}")"""

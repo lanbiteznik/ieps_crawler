@@ -23,12 +23,12 @@ def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
     
     # The med.over.net site with forum sections that will provide good crawling depth
     seed_urls = [
-       # "https://med.over.net/",
-       # "https://med.over.net/forum/",
-       # "https://med.over.net/forum/zdravje/",
-       # "https://med.over.net/forum/nosecnost-in-otroci/",
-       # "https://med.over.net/forum/dusevno-zdravje/"
-       "https://www.fri.uni-lj.si/"
+      
+       "https://www.fri.uni-lj.si/",
+       "https://fri.uni-lj.si/sl/studij",
+       "https://fri.uni-lj.si/sl/raziskave",
+       "https://fri.uni-lj.si/sl/raziskave/projekti"
+      
     ]
     
     print(f"Starting crawler with {num_workers} workers")
@@ -41,11 +41,18 @@ def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
     # Create a list to hold the futures
     futures = []
     
+    # Distribute seed URLs among workers
+    worker_seeds = []
+    for i in range(num_workers):
+        # Each worker gets one seed URL, cycling through the available URLs
+        worker_idx = i % len(seed_urls)
+        worker_seeds.append([seed_urls[worker_idx]])
+    
     # Use ThreadPoolExecutor as context manager
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         # Submit tasks and collect futures
         for i in range(num_workers):
-            future = executor.submit(run_worker, seed_urls, max_pages_per_worker, i)
+            future = executor.submit(run_worker, worker_seeds[i], max_pages_per_worker, i)
             futures.append(future)
         
         # Wait for all futures to complete
