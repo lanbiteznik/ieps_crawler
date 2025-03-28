@@ -5,6 +5,7 @@ import argparse
 import time
 from datetime import datetime
 from database import Database
+
 from shared_queue import SharedURLQueue
 
 def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
