@@ -9,9 +9,7 @@ import robotexclusionrulesparser
 import os
 from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup
-import gzip
 from datasketch import MinHash
-import heapq
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import CountVectorizer
 import base64
@@ -311,7 +309,7 @@ class Crawler:
         content = self.preprocess_html(html_content)
         minhash = MinHash()
         
-        # Tokenize the content (you can use words, n-grams, etc.)
+        # Tokenize the content
         tokens = content.split()
         
         # Update MinHash with the tokens
@@ -356,26 +354,25 @@ class Crawler:
 
     def extract_links(self, html_content, base_url):
         """Extract links from HTML content with priority information"""
-        links = []
         soup = BeautifulSoup(html_content, 'html.parser')
+        links = []
         
+        # Process all anchor tags
         for a_tag in soup.find_all('a', href=True):
-            href = a_tag['href']
-            # Skip empty links and javascript
-            if not href or href.startswith('javascript:'):
+            href = a_tag['href'].strip()
+            
+            if not href or href.startswith('#') or href.startswith('javascript:'):
                 continue
                 
-            # Convert relative URLs to absolute
-            absolute_url = urljoin(base_url, href)
+            # Normalize URL
+            full_url = urljoin(base_url, href)
+            canonical_url = self.canonicalize_url(full_url)
             
-            # Clean the URL
-            absolute_url = self.canonicalize_url(absolute_url)
+            # Get priority using surrounding context
+            priority = self.priority(a_tag)
             
-            # Only consider http and https URLs
-            if absolute_url.startswith(('http://', 'https://')):
-                # Calculate priority based on keywords in URL or surrounding text
-                priority = self.priority(a_tag)
-                links.append((absolute_url, priority))
+            # Return links with priority
+            links.append((canonical_url, priority))
         
         return links
         
@@ -514,7 +511,7 @@ class Crawler:
         return binary_types.get(content_type, None)
         
     def crawl_page(self, url):
-        """Crawl a single page"""
+        """Crawl a single page and extract links, images, etc."""
         parsed_url = urlparse(url)
         domain = parsed_url.netloc
         
@@ -592,8 +589,18 @@ class Crawler:
             # Handle HTML content
             if 'text/html' in content_type:
                 html_content = response.text
+                # Check for duplicate 
+                content_hash = hashlib.md5(html_content.encode('utf-8')).hexdigest()
+                duplicate_id, duplicate_url = self.db.check_content_hash_exists(content_hash)
                 
-                # Ensure HTML content is properly stored
+                if duplicate_id and duplicate_url != url:
+                    # Mark as duplicate and return
+                    print(f"Found duplicate: {url} matches {duplicate_url}")
+                    self.db.mark_as_duplicate(url, duplicate_url)
+                    return True  # Count as success since we processed it
+                    
+                # Process as normal HTML
+                # Store content
                 if html_content and len(html_content.strip()) > 0:
                     content_hash = self.compute_content_hash(html_content)
                     content_minhash = self.compute_minhash_signature(html_content)
@@ -603,33 +610,41 @@ class Crawler:
                     print(f"  Stored HTML content ({len(html_content)} bytes) with hash: {content_hash[:8]} and minhash{content_minhash[:6]}...")
                     
                     # Check if this is a duplicate
-                    duplicate_id, duplicate_url = self.db.check_content_hash_exists(content_hash)
-                    duplicate_id, duplicate_url = self.check_minhash_exists(content_minhash)
-                    if duplicate_id and duplicate_id != page_id:
-                        print(f"  Found duplicate content: {url} matches {duplicate_url}")
-                        self.db.mark_as_duplicate(url, duplicate_url)
-                        return page_id
+                    hash_dup_id, hash_dup_url = self.db.check_content_hash_exists(content_hash)
+                    minhash_dup_id, minhash_dup_url = self.check_minhash_exists(content_minhash)
+                    
+                    # Use separate variables and check both results
+                    if (hash_dup_id and hash_dup_id != page_id) or (minhash_dup_id and minhash_dup_id != page_id):
+                        # Use whichever duplicate was found
+                        found_dup_id = hash_dup_id or minhash_dup_id
+                        found_dup_url = hash_dup_url or minhash_dup_url
+                        print(f"  Found duplicate content: {url} matches {found_dup_url}")
+                        self.db.mark_as_duplicate(url, found_dup_url)
+                        return True
                 else:
                     print(f"  WARNING: Empty HTML content for {url}")
                     # Still update the page status even if content is empty
                     page_id = self.db.update_page(url, None, response.status_code, 'HTML')
                     print(f"  Created empty HTML page with ID: {page_id}")
                 
-                # Extract links
+                # Extract links and process them
                 links = self.extract_links(html_content, url)
-                for link, priority in links:
-                    # Add to frontier if not visited and meets domain criteria
-                    if link not in self.visited and domain in link:
-                        self.db.add_page_to_frontier(link, priority)
-                        self.frontier.append(link)
-                        
-                        # Store the link relationship
-                        self.db.add_link(url, link)
+                print(f"  Extracted {len(links)} links from {url}")
+                
+                for link_url, priority in links:
+                    # Add to database frontier
+                    self.db.add_page_to_frontier(link_url, priority)
+                    
+                    # Add to shared queue if available
+                    if hasattr(self, 'url_queue'):
+                        self.url_queue.add_url(link_url, priority)
+                    
+                    # Store link relationship
+                    self.db.add_link(url, link_url)
                 
                 # Extract images
                 self.extract_images(html_content, url, page_id)
-                
-                return page_id
+                return True
             else:
                 # Unknown content type
                 print(f"  Unknown content type: {content_type}")
@@ -641,6 +656,8 @@ class Crawler:
             # Mark as FRONTIER again in case of error
             if url not in self.visited:
                 self.db.add_page_to_frontier(url)
+            # Don't try to mark as "ERROR" since it's not a valid page type
+            return None
 
     def process_sitemap(self, base_url):
         """Process sitemap for the domain with improved processing"""
@@ -891,3 +908,35 @@ class Crawler:
                 
             # Add to frontier with priority
             self.db.add_page_to_frontier(url, priority)
+
+    def find_duplicates(self):
+        """Force comparison of all pages to detect duplicates"""
+        cursor = self.db.conn.cursor()
+        try:
+            # Get all HTML pages with content hash
+            cursor.execute("""
+                SELECT id, url, content_hash, content_minhash 
+                FROM crawldb.page 
+                WHERE page_type_code = 'HTML' 
+                AND (content_hash IS NOT NULL OR content_minhash IS NOT NULL)
+            """)
+            
+            pages = cursor.fetchall()
+            print(f"Checking {len(pages)} pages for duplicates...")
+            
+            # Compare each pair of pages
+            for i in range(len(pages)):
+                for j in range(i+1, len(pages)):
+                    page1_id, page1_url, page1_hash, page1_minhash = pages[i]
+                    page2_id, page2_url, page2_hash, page2_minhash = pages[j]
+                    
+                    # Check hash match
+                    if page1_hash and page2_hash and page1_hash == page2_hash:
+                        print(f"Hash match: {page1_url} and {page2_url}")
+                        self.db.mark_as_duplicate(page2_url, page1_url)
+                    # Check minhash match
+                    elif page1_minhash and page2_minhash and page1_minhash == page2_minhash:
+                        print(f"MinHash match: {page1_url} and {page2_url}")
+                        self.db.mark_as_duplicate(page2_url, page1_url)
+        finally:
+            cursor.close()
