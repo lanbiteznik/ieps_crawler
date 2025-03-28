@@ -35,6 +35,12 @@ def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
     print(f"Each worker will crawl up to {max_pages_per_worker} pages")
     print(f"Total target: {total_pages} pages")
     print(f"Starting time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    from database import Database
+    db = Database()
+    invalid_count = db.cleanup_invalid_sites()
+    if invalid_count > 0:
+        print(f"WARNING: Found {invalid_count} invalid domains in the site table.")
+        print("These will not be accessible via web browsers.")
     
     start_time = time.time()
     

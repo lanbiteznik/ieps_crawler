@@ -64,6 +64,10 @@ class Database:
     
     def add_site(self, domain, robots_content=None, sitemap_content=None):
         """Add a new site to the database if it doesn't exist and return its ID"""
+        domain = self.validate_and_clean_domain(domain)
+        if not domain:
+            return None
+            
         cursor = self.conn.cursor()
         try:
             # Check if site already exists
@@ -71,15 +75,27 @@ class Database:
             result = cursor.fetchone()
             
             if result:
-                return result[0]
-            
-            # Insert new site
-            cursor.execute(
-                "INSERT INTO crawldb.site (domain, robots_content, sitemap_content) VALUES (%s, %s, %s) RETURNING id",
-                (domain, robots_content, sitemap_content)
-            )
-            site_id = cursor.fetchone()[0]
-            return site_id
+                site_id = result[0]
+                
+                # Update robots content if provided and different
+                if robots_content:
+                    cursor.execute("""
+                        UPDATE crawldb.site 
+                        SET robots_content = %s 
+                        WHERE id = %s AND (robots_content IS NULL OR robots_content != %s)
+                    """, (robots_content, site_id, robots_content))
+                    
+                self.conn.commit()
+                return site_id
+            else:
+                # Create new site
+                cursor.execute(
+                    "INSERT INTO crawldb.site (domain, robots_content) VALUES (%s, %s) RETURNING id",
+                    (domain, robots_content)
+                )
+                site_id = cursor.fetchone()[0]
+                self.conn.commit()
+                return site_id
         finally:
             cursor.close()
     
@@ -417,5 +433,47 @@ class Database:
             print(f"Error removing sitemap URLs: {e}")
             self.conn.rollback()
             return 0
+        finally:
+            cursor.close()
+
+    def validate_and_clean_domain(self, domain):
+        """Clean up and validate domain format before storing"""
+        # Remove any protocol prefix if present
+        if domain.startswith(("http://", "https://")):
+            parsed = urlparse(domain)
+            domain = parsed.netloc
+        
+        # Check for invalid domains (email addresses, empty strings, etc)
+        if not domain or '@' in domain or domain == '://' or len(domain) < 3:
+            print(f"Skipping invalid domain: {domain}")
+            return None
+            
+        return domain
+
+    def cleanup_invalid_sites(self):
+        """Remove invalid site entries like email addresses from the database"""
+        cursor = self.conn.cursor()
+        try:
+            print("Cleaning up invalid sites...")
+            # Find sites with @ in domain (email addresses)
+            cursor.execute("SELECT id, domain FROM crawldb.site WHERE domain LIKE '%@%'")
+            email_sites = cursor.fetchall()
+            
+            # Find completely invalid domains
+            cursor.execute("SELECT id, domain FROM crawldb.site WHERE domain = '://' OR LENGTH(domain) < 3")
+            invalid_sites = cursor.fetchall()
+            
+            all_invalid = email_sites + invalid_sites
+            
+            if all_invalid:
+                print(f"Found {len(all_invalid)} invalid site entries:")
+                for site_id, domain in all_invalid:
+                    print(f"  - ID: {site_id}, Invalid domain: {domain}")
+                    
+                print("These entries cannot be accessed via browser and should be removed.")
+            else:
+                print("No invalid site entries found.")
+                
+            return len(all_invalid)
         finally:
             cursor.close()
