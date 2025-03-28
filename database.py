@@ -3,6 +3,16 @@ from urllib.parse import urlparse
 from datetime import datetime
 import threading
 
+import dotenv
+import os
+
+dotenv.load_dotenv()
+db_name = os.getenv("DB_NAME")
+db_user = os.getenv("DB_USER")
+db_password = os.getenv("DB_PASSWORD")
+db_host = os.getenv("DB_HOST")
+db_port = os.getenv("DB_PORT")
+
 class Database:
     # Add this as a class variable
     _processing_lock = threading.Lock()
@@ -11,11 +21,11 @@ class Database:
         try:
             # Connect to the existing wier database
             self.conn = psycopg2.connect(
-                host="localhost",
-                port=5432,
-                database="wier",
-                user="postgres",
-                password="admin"
+                host=db_host,
+                port=db_port,
+                database=db_name,
+                user=db_user,
+                password=db_password,
             )
             self.conn.autocommit = True
             
@@ -54,6 +64,17 @@ class Database:
                 print("Adding content_hash column to page table...")
                 cursor.execute("ALTER TABLE crawldb.page ADD COLUMN content_hash VARCHAR(32)")
             
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_schema = 'crawldb' 
+                AND table_name = 'page' 
+                AND column_name = 'content_minhash'
+            """)
+            if not cursor.fetchone():
+                print("Adding content_minhash column to page table...")
+                cursor.execute("ALTER TABLE crawldb.page ADD COLUMN content_minhash VARCHAR(512)")
+
             # Add duplicate_id column if it doesn't exist
             cursor.execute("""
                 SELECT column_name 

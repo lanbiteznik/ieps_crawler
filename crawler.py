@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup
 from datasketch import MinHash
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import CountVectorizer
+import base64
 #todo scroll 5000 html pages. 
 
 class CustomRobotsParser:
@@ -315,11 +316,10 @@ class Crawler:
         for token in tokens:
             minhash.update(token.encode('utf8'))
         
-        # Convert MinHash to a string representation for storage
-        minhash_hex = ''.join(format(x, '02x') for x in minhash.digest())
-        
-        # Return the correct MinHash hex value, not MD5
-        return minhash_hex
+        hashable_minhash =  base64.b64encode(minhash.digest().tobytes()).decode("utf-8") 
+        self.min_hash_cache.add(hashable_minhash) 
+        print(f"  MinHash signature hashable minhash: {hashable_minhash}")
+        return hashable_minhash
     
     def preprocess_html(self, html_content):
         # Parse HTML and extract meaningful text
@@ -340,17 +340,18 @@ class Crawler:
             return True 
         else:
             return False
-    def check_minhash_exists(self, minhash_hex):
-        """Check if MinHash exists in the database by its hex representation"""
-        try:
-            result = self.db.get_duplicate_page_by_minhash_hex(minhash_hex)
-            if result and result[0]:
-                print(f"MinHash match found: {result[1]}")
-            return result
-        except Exception as e:
-            print(f"Error checking minhash: {e}")
-            return None, None
+    
+    def check_minhash_exists(self, minhash):
+        """Check if MinHash exists in the cache"""
+        minhash_signature = minhash
         
+        for existing_signature in self.min_hash_cache:
+            if self.compare_minhash(existing_signature, minhash_signature):
+                duplicate_id, duplicate_url = self.db.get_duplicate_page_by_minhash(existing_signature)
+                return duplicate_id, duplicate_url
+                
+        return None, None
+
     def extract_links(self, html_content, base_url):
         """Extract links from HTML content with priority information"""
         soup = BeautifulSoup(html_content, 'html.parser')
