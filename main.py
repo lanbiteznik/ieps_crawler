@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from database import Database
 
+
 def run_worker(seed_urls, max_pages, worker_id, keywords=None):
     try:
         print(f"Starting worker {worker_id} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

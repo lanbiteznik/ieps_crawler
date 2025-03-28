@@ -14,6 +14,7 @@ from datasketch import MinHash
 import heapq
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import CountVectorizer
+import base64
 #todo scroll 5000 html pages. 
 
 class CustomRobotsParser:
@@ -317,8 +318,10 @@ class Crawler:
         for token in tokens:
             minhash.update(token.encode('utf8'))
         
-        self.min_hash_cache.add(minhash)
-        return minhash
+        hashable_minhash =  base64.b64encode(minhash.digest().tobytes()).decode("utf-8") 
+        self.min_hash_cache.add(hashable_minhash) 
+        print(f"  MinHash signature hashable minhash: {hashable_minhash}")
+        return hashable_minhash
     
     def preprocess_html(self, html_content):
         # Parse HTML and extract meaningful text
@@ -339,16 +342,18 @@ class Crawler:
             return True 
         else:
             return False
-        
+    
     def check_minhash_exists(self, minhash):
-        """Check if MinHash exists in the cache, if it does then fetch duplicate from db"""
-        for existing_minhash in self.min_hash_cache:
-            if self.compare_minhash(existing_minhash, minhash):
-                # Fetch the duplicate page ID and URL from the database
-                duplicate_id, duplicate_url = self.db.get_duplicate_page_by_minhash(existing_minhash)
-                return duplicate_id, duplicate_url
-        return None, None
+        """Check if MinHash exists in the cache"""
+        minhash_signature = minhash
         
+        for existing_signature in self.min_hash_cache:
+            if self.compare_minhash(existing_signature, minhash_signature):
+                duplicate_id, duplicate_url = self.db.get_duplicate_page_by_minhash(existing_signature)
+                return duplicate_id, duplicate_url
+                
+        return None, None
+
     def extract_links(self, html_content, base_url):
         """Extract links from HTML content with priority information"""
         links = []
