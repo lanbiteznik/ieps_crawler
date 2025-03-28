@@ -625,6 +625,7 @@ class Crawler:
                     print(f"  WARNING: Empty HTML content for {url}")
                     # Still update the page status even if content is empty
                     page_id = self.db.update_page(url, None, response.status_code, 'HTML')
+                    print(f"  Created empty HTML page with ID: {page_id}")
                 
                 # Extract links and process them
                 links = self.extract_links(html_content, url)

@@ -561,6 +561,7 @@ class Database:
             cursor.execute(
                 """
                 UPDATE crawldb.page 
+                SET page_type_code = 'PROCESSING',
                 SET accessed_time = NOW()
                 WHERE url = %s
                 """,
