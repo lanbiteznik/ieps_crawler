@@ -167,27 +167,33 @@ class Crawler:
         Returns:
             float: Priority score (lower number represents high priority).
         """
-        window_size = 50
-        # Get the content of the parent tag to the link
-        sourounding_text = link_tag.parent.text
-        #if not sourounding_text.strip():
-        #    return 1  # Low priority
+        highest_similarity = 0.0
+        for keyword in self.db.preferential_keywords:
+            window_size = 50
+            # Get the content of the parent tag to the link
+            sourounding_text = link_tag.parent.text
+            #if not sourounding_text.strip():
+            #    return 1  # Low priority
 
-        index = sourounding_text.find(link_tag.text)
-        start = max(0, index - window_size)
-        end = min(len(sourounding_text), index + window_size)
-        sourounding_text = sourounding_text[start:end]
+            index = sourounding_text.find(link_tag.text)
+            start = max(0, index - window_size)
+            end = min(len(sourounding_text), index + window_size)
+            sourounding_text = sourounding_text[start:end]
 
-        # Create Bag of Words representations
-        vectorizer = CountVectorizer(stop_words='english')
-        texts = [self.keyword, sourounding_text]
-        word_vectors = vectorizer.fit_transform(texts)
+            # Create Bag of Words representations
+            vectorizer = CountVectorizer(stop_words='english')
+            texts = [keyword, sourounding_text]
+            word_vectors = vectorizer.fit_transform(texts)
 
-        # Compute cosine similarity between the two bags of words
-        similarity = cosine_similarity(word_vectors[0], word_vectors[1])[0][0]
+            # Compute cosine similarity between the two bags of words
+            similarity = cosine_similarity(word_vectors[0], word_vectors[1])[0][0]
+
+            if similarity > highest_similarity:
+                highest_similarity = similarity
+
         
-        # compue priority based on vector similarity (more similar texts should result in higher priority (lower return number))
-        priority = 1 - similarity
+        # Similarity is biggest at 1.0, but priority is lowest at 1.0
+        priority = 1 - highest_similarity
         return priority
     
     def get_robots_parser(self, url):
