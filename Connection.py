@@ -46,6 +46,7 @@ class PostgresDB:
 
     def execute_query(self, query, params=None):
         """Executes a SQL query and returns the result."""
+        ""
         try:
             if self.cursor:
                 self.cursor.execute(query, params)
@@ -53,6 +54,24 @@ class PostgresDB:
         except Exception as e:
             print("Query execution error:", e)
         return None
+    
+    def insert_image(self, page_id, filename, content_type, image_data, accessed_time):
+        try:
+            query = """
+            INSERT INTO crawldb.image (page_id, filename, content_type, "data", accessed_time)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id;
+            """
+
+            self.cursor.execute(query, (page_id, filename, content_type, image_data, accessed_time))
+            image_id = self.cursor.fetchone()[0]
+            self.conn.commit()
+
+            print(f"Inserted image with ID {image_id} for page {page_id}.")
+            return image_id
+        except Exception as e:
+            self.conn.rollback()
+            print("Error inserting image:", e)
 
     def insert_data_type(self, code):
         try:
@@ -83,19 +102,37 @@ class PostgresDB:
         except Exception as e:
             print("Error inserting site:", e)
 
-    def insert_page(self, site_id, page_type_code, url, html_content, http_status_code, accessed_time):
+    def insert_page_data(self, page_id, data_type_code, data):
+        """Inserts data into the crawldb.page_data table."""
         try:
             self.cursor.execute(
-                "INSERT INTO crawldb.page (site_id, page_type_code, url, html_content, http_status_code, accessed_time) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;",
+                "INSERT INTO crawldb.page_data (page_id, data_type_code, data) VALUES (%s, %s, %s);",
+                (page_id, data_type_code, psycopg2.Binary(data))
+            )
+            self.conn.commit()
+            print(f"Inserted into page_data: page_id={page_id}, data_type_code={data_type_code}")
+        except Exception as e:
+            print("Error inserting page_data:", e)
+
+    def insert_page(self, site_id, page_type_code, url, html_content, http_status_code, accessed_time):
+        """Inserts a page into the crawldb.page table."""
+        try:
+            self.cursor.execute(
+                """
+                INSERT INTO crawldb.page (site_id, page_type_code, url, html_content, http_status_code, accessed_time)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;
+                """,
                 (site_id, page_type_code, url, html_content, http_status_code, accessed_time)
             )
             page_id = self.cursor.fetchone()[0]
             self.conn.commit()
-            print("Inserted into page, ID:", page_id)
+            print(f"Inserted into page: ID={page_id}, URL={url}")
             return page_id
         except Exception as e:
             print("Error inserting page:", e)
-            
+            self.conn.rollback()
+            return None  # Return None in case of failure
+     
     def close(self):
         """Closes the database connection."""
         if self.cursor:
@@ -104,7 +141,6 @@ class PostgresDB:
             self.conn.close()
         print("Database connection closed.")
 
-# Example Usage
 if __name__ == "__main__":
     db = PostgresDB(db_name, db_user, db_password, db_host, db_port)
     db.connect()
