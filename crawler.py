@@ -110,8 +110,7 @@ class Crawler:
         empty_frontier_count = 0  # Track consecutive empty frontier results
         
         while pages_crawled < self.max_pages:
-            # Get next URL from frontier
-            print(f"Fetching next URL from frontier ({pages_crawled}/{self.max_pages})...")
+            # IMPORTANT: Use preferential method to get next URL
             next_url = self.db.get_next_frontier_page_preferential()
             
             if not next_url:
@@ -261,50 +260,36 @@ class Crawler:
         return hashlib.md5(content.encode('utf-8')).hexdigest()
         
     def extract_links(self, html_content, base_url):
-        """Extract links from HTML content with improved handling"""
+        """Extract links from HTML content with priority information"""
         links = []
+        soup = BeautifulSoup(html_content, 'html.parser')
         
-        try:
-            # Use proper parser
-            soup = BeautifulSoup(html_content, 'html.parser')
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href']
+            # Skip empty links and javascript
+            if not href or href.startswith('javascript:'):
+                continue
+                
+            # Convert relative URLs to absolute
+            absolute_url = urljoin(base_url, href)
             
-            # Extract standard links
-            for a_tag in soup.find_all('a', href=True):
-                href = a_tag['href'].strip()
-                
-                # Skip empty links, javascript and anchor links
-                if (not href or 
-                    href.startswith('javascript:') or 
-                    href.startswith('#') or
-                    href.startswith('mailto:') or
-                    href.startswith('tel:')):
-                    continue
-                    
-                # Resolve relative URLs
-                absolute_url = urljoin(base_url, href)
-                
-                # Canonicalize URL
-                canonical_url = self.canonicalize_url(absolute_url)
-                
-                # Only add HTTP/HTTPS URLs
-                if canonical_url.startswith(('http://', 'https://')):
-                    links.append(canonical_url)
+            # Clean the URL
+            absolute_url = self.canonicalize_url(absolute_url)
             
-            # Extract onclick JavaScript links
-            for tag in soup.find_all(onclick=re.compile('window.location')):
-                onclick = tag.get('onclick', '')
-                match = re.search(r'window\.location(?:\.href)?\s*=\s*[\'"]([^\'"]+)[\'"]', onclick)
-                if match:
-                    href = match.group(1).strip()
-                    absolute_url = urljoin(base_url, href)
-                    canonical_url = self.canonicalize_url(absolute_url)
-                    if canonical_url.startswith(('http://', 'https://')):
-                        links.append(canonical_url)
-                        
-            return list(set(links))  # Remove duplicates
-        except Exception as e:
-            print(f"  Error extracting links: {e}")
-            return []
+            # Only consider http and https URLs
+            if absolute_url.startswith(('http://', 'https://')):
+                # Calculate priority based on keywords in URL or surrounding text
+                priority = 0
+                
+                if hasattr(self.db, 'preferential_keywords'):
+                    for keyword in self.db.preferential_keywords:
+                        if keyword.lower() in absolute_url.lower():
+                            priority = 1
+                            break
+                
+                links.append((absolute_url, priority))
+        
+        return links
         
     def extract_images(self, html_content, base_url, page_id):
         """Extract images from HTML with full information"""
@@ -541,7 +526,7 @@ class Crawler:
                 
                 # Extract links
                 links = self.extract_links(html_content, url)
-                for link in links:
+                for link, priority in links:
                     # Add to frontier if not visited and meets domain criteria
                     if link not in self.visited and domain in link:
                         self.db.add_page_to_frontier(link)
@@ -566,120 +551,146 @@ class Crawler:
             if url not in self.visited:
                 self.db.add_page_to_frontier(url)
 
-    def process_sitemap(self, url):
+    def process_sitemap(self, base_url):
         """Process sitemap for the domain with improved processing"""
-        parsed_url = urlparse(url)
-        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-        domain = parsed_url.netloc
-        
-        print(f"\n=== Processing sitemaps for {domain} ===")
-        
-        # Common sitemap locations - expanded list
-        sitemap_urls = [
-            f"{base_url}/sitemap.xml",
-            f"{base_url}/sitemap_index.xml",
-            f"{base_url}/sitemap",
-            f"{base_url}/sitemapindex.xml",
-            f"{base_url}/sitemap_news.xml",
-            f"{base_url}/sitemap_pages.xml",
-            f"{base_url}/sitemap/sitemap.xml",
-            f"{base_url}/sitemap.xml.gz",
-            f"{base_url}/sitemap/",
-            f"{base_url}/wp-sitemap.xml",
-            f"{base_url}/sitemap.php"
-            ]
-        
-        # First check robots.txt for sitemap
-        robots_parser = self.get_robots_parser(url)
-        if hasattr(robots_parser, "sitemaps") and robots_parser.sitemaps:
-            print(f"  Found {len(robots_parser.sitemaps)} sitemaps in robots.txt")
-            sitemap_urls = robots_parser.sitemaps + sitemap_urls
-        
-        # Add med.over.net specific sitemap URLs
-        if 'med.over.net' in domain:
-            sitemap_urls.append(f"{base_url}/page-sitemap.xml")
-            sitemap_urls.append(f"{base_url}/forum-sitemap.xml")
-            sitemap_urls.append(f"{base_url}/post-sitemap.xml")
+        domain = urlparse(base_url).netloc
+        print(f"\nSearching for sitemaps on domain: {domain}")
         
         found_sitemap = False
-        for sitemap_url in sitemap_urls:
-            try:
-                print(f"  Checking sitemap URL: {sitemap_url}")
-                # Force sitemap requests to ignore robots.txt
-                response = requests.get(
-                    sitemap_url, 
-                    headers=self.headers, 
-                    timeout=10
-                )
-                
-                if response.status_code == 200:
-                    sitemap_content = response.text
-                    
-                    # Very aggressive check - if it contains <url> or <loc>, consider it a sitemap
-                    if '<url>' in sitemap_content or '<loc>' in sitemap_content:
-                        print(f"  Found valid sitemap at {sitemap_url}")
-                        found_sitemap = True
-                        
-                        # Store sitemap in database even if parsing might fail
-                        success = self.db.update_site_sitemap(domain, sitemap_content)
-                        if not success:
-                            print(f"  ERROR: Failed to store sitemap for {domain}")
-                        else:
-                            print(f"  Sitemap successfully stored for {domain}")
-                        
-                        # Extract URLs from sitemap using a more lenient regex
-                        soup = BeautifulSoup(sitemap_content, 'xml')
-                        urls = [loc.text.strip() for loc in soup.find_all('loc')]
-                        print(f"  Found {len(urls)} URLs in sitemap")
-                        
-                        # Process nested sitemaps
-                        if "<sitemapindex" in sitemap_content:
-                            print("  This is a sitemap index, processing nested sitemaps...")
-                            nested_urls = []
-                            for nested_sitemap_url in urls:
-                                try:
-                                    nested_response = requests.get(
-                                        nested_sitemap_url, 
-                                        headers=self.headers, 
-                                        timeout=10
-                                    )
-                                    if nested_response.status_code == 200:
-                                        if nested_sitemap_url.endswith('.gz'):
-                                         
-                                            nested_content = gzip.decompress(nested_response.content).decode('utf-8')
-                                        else:
-                                            nested_content = nested_response.text
-                                        # Extract URLs from nested sitemaps
-                                        soup = BeautifulSoup(nested_content, 'xml')
-                                        nested_loc_urls = [loc.text.strip() for loc in soup.find_all('loc')]
-                                        print(f"    Found {len(nested_loc_urls)} URLs in nested sitemap {nested_sitemap_url}")
-                                        nested_urls.extend(nested_loc_urls)
-                                    else:
-                                        print(f"    Failed to fetch nested sitemap {nested_sitemap_url}: {nested_response.status_code}")
-                                except Exception as e:
-                                    print(f"    Error processing nested sitemap {nested_sitemap_url}: {e}")
-                            
-                            # Add all nested URLs to frontier
-                            print(f"  Adding {len(nested_urls)} URLs from nested sitemaps to frontier")
-                            for nested_url in nested_urls:
-                                self.db.add_page_to_frontier(nested_url)
-                        else:
-                            # Process regular sitemap
-                            print(f"  Adding {len(urls)} URLs from sitemap to frontier")
-                            for sitemap_url in urls:
-                                self.db.add_page_to_frontier(sitemap_url)
-                    else:
-                        print(f"  Found response at {sitemap_url} but not a valid sitemap format")
-                else:
-                    print(f"  No sitemap at {sitemap_url} (status code: {response.status_code})")
-            except Exception as e:
-                print(f"  Error processing sitemap at {sitemap_url}: {e}")
         
-        if not found_sitemap:
-            print(f"  No sitemap found for {domain}")
+        # FIRST: Check if we already have sitemap URLs from robots.txt
+        robots_parser = self.get_robots_parser(base_url)
+        if hasattr(robots_parser, 'sitemaps') and robots_parser.sitemaps:
+            print(f"  Found {len(robots_parser.sitemaps)} sitemap(s) in robots.txt")
             
-        print(f"=== Completed sitemap processing for {domain} ===\n")
-        return found_sitemap
+            # Process each sitemap from robots.txt
+            for sitemap_url in robots_parser.sitemaps:
+                try:
+                    print(f"  Processing sitemap from robots.txt: {sitemap_url}")
+                    response = requests.get(sitemap_url, headers=self.headers, timeout=10)
+                    
+                    if response.status_code == 200:
+                        # Process the sitemap content
+                        sitemap_content = response.text
+                        success = self.db.update_site_sitemap(domain, sitemap_content)
+                        print(f"  Sitemap storage result: {success}")
+                        
+                        # Process sitemap contents
+                        if '<url>' in sitemap_content or '<loc>' in sitemap_content:
+                            found_sitemap = True
+                            self.process_sitemap_content(sitemap_content, sitemap_url, domain)
+                except Exception as e:
+                    print(f"  Error processing sitemap from robots.txt: {e}")
+        
+        # Only try common paths if no sitemaps found in robots.txt
+        if not found_sitemap:
+            # Your existing code for common sitemap paths
+            # ...
+            # Common sitemap paths to check
+            sitemap_paths = [
+                "sitemap.xml",
+                "sitemap_index.xml",
+                "sitemap/sitemap.xml", 
+                "sitemaps/sitemap.xml",
+                "wp-sitemap.xml",         # WordPress sitemaps
+                "sitemap-index.xml",      # Add more variations
+                "wp-sitemap-index.xml",   # WordPress specific format
+                "main-sitemap.xml",       # Another common format
+                "forum-sitemap.xml"       # Med.over.net specific sitemap
+            ]
+            
+            found_sitemap = False
+            for path in sitemap_paths:
+                sitemap_url = urljoin(base_url, path)
+                try:
+                    print(f"  Trying sitemap URL: {sitemap_url}")
+                    response = requests.get(
+                        sitemap_url, 
+                        headers=self.headers, 
+                        timeout=10
+                    )
+                    
+                    if response.status_code == 200:
+                        sitemap_content = response.text
+                        
+                        # Check if it's a valid sitemap
+                        if '<url>' in sitemap_content or '<loc>' in sitemap_content:
+                            print(f"  Found valid sitemap at {sitemap_url}")
+                            found_sitemap = True
+                            
+                            # Store sitemap content in database
+                            success = self.db.update_site_sitemap(domain, sitemap_content)
+                            print(f"  Sitemap storage result: {success}")
+                            
+                            # Parse sitemap and extract URLs
+                            try:
+                                soup = BeautifulSoup(sitemap_content, 'xml')
+                                urls = [loc.text.strip() for loc in soup.find_all('loc')]
+                                print(f"  Found {len(urls)} URLs in sitemap")
+                                
+                                # Process sitemap index (nested sitemaps)
+                                if "<sitemapindex" in sitemap_content:
+                                    print("  This is a sitemap index, processing nested sitemaps...")
+                                    for nested_url in urls:
+                                        nested_response = requests.get(nested_url, headers=self.headers, timeout=10)
+                                        if nested_response.status_code == 200:
+                                            nested_content = nested_response.text
+                                            nested_soup = BeautifulSoup(nested_content, 'xml')
+                                            nested_urls = [loc.text.strip() for loc in nested_soup.find_all('loc')]
+                                            print(f"    Found {len(nested_urls)} URLs in nested sitemap")
+                                            
+                                            # Add these URLs to frontier
+                                            for url in nested_urls:
+                                                self.db.add_page_to_frontier(url)
+                                else:
+                                    # Regular sitemap, add all URLs to frontier
+                                    for url in urls:
+                                        self.db.add_page_to_frontier(url)
+                            except Exception as e:
+                                print(f"  Error parsing sitemap: {e}")
+                            
+                            break  # Stop checking other paths if we found a sitemap
+                        else:
+                            print(f"  Not a valid sitemap format at {sitemap_url}")
+                except Exception as e:
+                    print(f"  Error checking sitemap at {sitemap_url}: {e}")
+            
+            if not found_sitemap:
+                print(f"  No sitemap found for domain {domain}")
+
+    def process_sitemap_content(self, sitemap_content, sitemap_url, domain):
+        """Process the content of a sitemap XML file"""
+        if '<url>' in sitemap_content or '<loc>' in sitemap_content:
+            print(f"  Found valid sitemap at {sitemap_url}")
+            
+            try:
+                soup = BeautifulSoup(sitemap_content, 'xml')
+                urls = [loc.text.strip() for loc in soup.find_all('loc')]
+                print(f"  Found {len(urls)} URLs in sitemap")
+                
+                # Process sitemap index (nested sitemaps)
+                if "<sitemapindex" in sitemap_content:
+                    print("  This is a sitemap index, processing nested sitemaps...")
+                    for nested_url in urls:
+                        nested_response = requests.get(nested_url, headers=self.headers, timeout=10)
+                        if nested_response.status_code == 200:
+                            nested_content = nested_response.text
+                            nested_soup = BeautifulSoup(nested_content, 'xml')
+                            nested_urls = [loc.text.strip() for loc in nested_soup.find_all('loc')]
+                            print(f"    Found {len(nested_urls)} URLs in nested sitemap")
+                            
+                            # Add these URLs to frontier
+                            for url in nested_urls:
+                                self.db.add_page_to_frontier(url)
+                else:
+                    # Regular sitemap, add all URLs to frontier
+                    for url in urls:
+                        self.db.add_page_to_frontier(url)
+                return True
+            except Exception as e:
+                print(f"  Error parsing sitemap: {e}")
+        
+        return False
 
     def probe_for_binary_content(self, domain):
         """Explicitly probe for common binary files on domain"""
@@ -749,3 +760,44 @@ class Crawler:
         # Processing logic here
         if "<sitemapindex" in content:
             return self.process_sitemap_url(nested_url, depth+1)
+
+    def analyze_link_context(self, html_content, link, surrounding_window=50):
+        """
+        Analyze the context around a link to determine its priority
+        based on proximity to preferential keywords
+        """
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Find the link tag
+        link_tags = soup.find_all('a', href=True)
+        for link_tag in link_tags:
+            if link_tag.get('href') in link or link in link_tag.get('href'):
+                # Get surrounding text
+                parent_text = link_tag.parent.text
+                link_text = link_tag.text
+                
+                if not hasattr(self.db, 'preferential_keywords'):
+                    return 0
+                    
+                # Check if any keyword is in surrounding text
+                for keyword in self.db.preferential_keywords:
+                    if keyword.lower() in parent_text.lower():
+                        return 1  # Higher priority
+                        
+        return 0  # Normal priority
+
+    def add_urls_to_frontier(self, links, source_url):
+        """Add URLs to frontier with priority information"""
+        # Get domain of source URL for domain filtering
+        source_domain = urlparse(source_url).netloc
+        
+        for url, priority in links:
+            parsed = urlparse(url)
+            target_domain = parsed.netloc
+            
+            # Skip already visited URLs
+            if url in self.visited:
+                continue
+                
+            # Add to frontier with priority
+            self.db.add_page_to_frontier(url, priority)
