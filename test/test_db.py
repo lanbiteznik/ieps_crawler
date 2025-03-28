@@ -60,7 +60,7 @@ def test_database_operations():
         html_content = "<html><body><h1>Test HTML</h1><p>This is test content.</p></body></html>"
         content_hash = hashlib.md5(html_content.encode('utf-8')).hexdigest()
         
-        page_id = db.update_page_with_hash(html_url, html_content, 200, content_hash)
+        page_id = db.update_page_with_hash_and_minhash(html_url, html_content, 200, content_hash)
         print(f"Updated HTML page (ID: {page_id}): {html_url}")
         
         # Binary page
@@ -213,7 +213,7 @@ def test_crawler_extraction():
         db.add_page_to_frontier(url2)
         
         # Store first page
-        page_id1 = db.update_page_with_hash(url1, content1, 200, content_hash)
+        page_id1 = db.update_page_with_hash_and_minhash(url1, content1, 200, content_hash)
         print(f"Created first page with hash: {content_hash}")
         
         # Check if duplicate detection works when crawling second page
@@ -421,7 +421,7 @@ def test_real_world_extraction():
         db.add_page_to_frontier(url2)
         
         # Add first page
-        page_id1 = db.update_page_with_hash(url1, unique_content, 200, content_hash)
+        page_id1 = db.update_page_with_hash_and_minhash(url1, unique_content, 200, content_hash)
         print(f"Created first page with hash: {content_hash}")
         
         # Add second page with same content
@@ -498,7 +498,7 @@ def test_duplicate_detection():
         
         # Add to frontier and create first page
         db.add_page_to_frontier(url1)
-        page_id1 = db.update_page_with_hash(url1, unique_content, 200, content_hash)
+        page_id1 = db.update_page_with_hash_and_minhash(url1, unique_content, 200, content_hash)
         print(f"Created first page with hash: {content_hash}")
         
         # Check for duplicate detection
@@ -522,7 +522,7 @@ def test_duplicate_detection():
                 print("✅ Database successfully marked page as duplicate")
                 
                 # Additional check for successful crawler integration
-                db.update_page_with_hash(url2, unique_content, 200, content_hash)
+                db.update_page_with_hash_and_minhash(url2, unique_content, 200, content_hash)
                 cursor.execute(
                     "SELECT page_type_code FROM crawldb.page WHERE url = %s", 
                     (url2,)
@@ -805,9 +805,9 @@ def test_sitemap_extraction_from_robots():
 
 if __name__ == "__main__":
     # Comment out these if you only want to run the real-world test
-    # test_database_operations()
-    # test_crawler_extraction()
-    #test_real_world_extraction()
-    #test_duplicate_detection()
+    test_database_operations()
+    test_crawler_extraction()
+    test_real_world_extraction()
+    test_duplicate_detection()
     test_preferential_crawling()
-    #test_sitemap_extraction_from_robots()
+    test_sitemap_extraction_from_robots()

@@ -10,7 +10,11 @@ import os
 from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup
 import gzip
-
+from datasketch import MinHash
+import heapq
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import CountVectorizer
+#todo scroll 5000 html pages. 
 
 class CustomRobotsParser:
     """Wrapper for robotexclusionrulesparser with additional attributes"""
@@ -92,6 +96,7 @@ class Crawler:
         self.user_agent = "fri-wier-FTL"
         self.headers = {'User-Agent': self.user_agent}
         self.robots_cache = {}  # Cache for robots.txt
+        self.min_hash_cache = set() 
         
     def start(self):
         # Add seed URLs to frontier pages in database
@@ -102,7 +107,7 @@ class Crawler:
             self.db.remove_sitemap_urls_from_frontier()
         
         for url in self.frontier:
-            success = self.db.add_page_to_frontier(url)
+            success = self.db.add_page_to_frontier(url, priority=0)
             print(f"Added {url} to frontier: {success}")
         
         print("Starting crawling process...")
@@ -149,7 +154,42 @@ class Crawler:
                 time.sleep(delay)
         
         print(f"Worker finished after crawling {pages_crawled} pages")
-            
+    
+    def priority(self, link_tag):
+        """
+        Compute the priority of a link.
+
+        Args:
+            html (str): HTML content of the page.
+            link (str): Link URL.
+            link_tag (bs4.Tag): BeautifulSoup tag representing the link.
+
+        Returns:
+            float: Priority score (lower number represents high priority).
+        """
+        window_size = 50
+        # Get the content of the parent tag to the link
+        sourounding_text = link_tag.parent.text
+        #if not sourounding_text.strip():
+        #    return 1  # Low priority
+
+        index = sourounding_text.find(link_tag.text)
+        start = max(0, index - window_size)
+        end = min(len(sourounding_text), index + window_size)
+        sourounding_text = sourounding_text[start:end]
+
+        # Create Bag of Words representations
+        vectorizer = CountVectorizer(stop_words='english')
+        texts = [self.keyword, sourounding_text]
+        word_vectors = vectorizer.fit_transform(texts)
+
+        # Compute cosine similarity between the two bags of words
+        similarity = cosine_similarity(word_vectors[0], word_vectors[1])[0][0]
+        
+        # compue priority based on vector similarity (more similar texts should result in higher priority (lower return number))
+        priority = 1 - similarity
+        return priority
+    
     def get_robots_parser(self, url):
         """Get robots parser for the domain with improved sitemap detection"""
         parsed_url = urlparse(url)
@@ -258,6 +298,50 @@ class Crawler:
     def compute_content_hash(self, content):
         """Compute hash of content to detect duplicates"""
         return hashlib.md5(content.encode('utf-8')).hexdigest()
+    
+    def compute_minhash_signature(self, html_content):
+        """Compute MinHash signature for the content"""
+        content = self.preprocess_html(html_content)
+        minhash = MinHash()
+        
+        # Tokenize the content (you can use words, n-grams, etc.)
+        tokens = content.split()
+        
+        # Update MinHash with the tokens
+        for token in tokens:
+            minhash.update(token.encode('utf8'))
+        
+        self.min_hash_cache.add(minhash)
+        return minhash
+    
+    def preprocess_html(self, html_content):
+        # Parse HTML and extract meaningful text
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Remove script and style tags
+        for script_or_style in soup(['script', 'style']):
+            script_or_style.decompose()
+        
+        # Get text content (you can also tokenize here if needed)
+        text_content = soup.get_text().strip()
+        return text_content
+    
+    def compare_minhash(self, minhash1, minhash2):
+        # Compare the Jaccard similarity based on the Minhash signatures
+        similarity = minhash1.jaccard(minhash2)
+        if similarity > 0.8:
+            return True 
+        else:
+            return False
+        
+    def check_minhash_exists(self, minhash):
+        """Check if MinHash exists in the cache, if it does then fetch duplicate from db"""
+        for existing_minhash in self.min_hash_cache:
+            if self.compare_minhash(existing_minhash, minhash):
+                # Fetch the duplicate page ID and URL from the database
+                duplicate_id, duplicate_url = self.db.get_duplicate_page_by_minhash(existing_minhash)
+                return duplicate_id, duplicate_url
+        return None, None
         
     def extract_links(self, html_content, base_url):
         """Extract links from HTML content with priority information"""
@@ -279,14 +363,7 @@ class Crawler:
             # Only consider http and https URLs
             if absolute_url.startswith(('http://', 'https://')):
                 # Calculate priority based on keywords in URL or surrounding text
-                priority = 0
-                
-                if hasattr(self.db, 'preferential_keywords'):
-                    for keyword in self.db.preferential_keywords:
-                        if keyword.lower() in absolute_url.lower():
-                            priority = 1
-                            break
-                
+                priority = self.priority(a_tag)
                 links.append((absolute_url, priority))
         
         return links
@@ -508,13 +585,15 @@ class Crawler:
                 # Ensure HTML content is properly stored
                 if html_content and len(html_content.strip()) > 0:
                     content_hash = self.compute_content_hash(html_content)
-                    page_id = self.db.update_page_with_hash(url, html_content, response.status_code, content_hash)
+                    content_minhash = self.compute_minhash_signature(html_content)
+                    page_id = self.db.update_page_with_hash_and_minhash(url, html_content, response.status_code, content_hash, content_minhash)
                     
                     # Debug successful storage
-                    print(f"  Stored HTML content ({len(html_content)} bytes) with hash: {content_hash[:8]}...")
+                    print(f"  Stored HTML content ({len(html_content)} bytes) with hash: {content_hash[:8]} and minhash{content_minhash[:6]}...")
                     
                     # Check if this is a duplicate
                     duplicate_id, duplicate_url = self.db.check_content_hash_exists(content_hash)
+                    duplicate_id, duplicate_url = self.check_minhash_exists(content_minhash)
                     if duplicate_id and duplicate_id != page_id:
                         print(f"  Found duplicate content: {url} matches {duplicate_url}")
                         self.db.mark_as_duplicate(url, duplicate_url)
@@ -529,7 +608,7 @@ class Crawler:
                 for link, priority in links:
                     # Add to frontier if not visited and meets domain criteria
                     if link not in self.visited and domain in link:
-                        self.db.add_page_to_frontier(link)
+                        self.db.add_page_to_frontier(link, priority)
                         self.frontier.append(link)
                         
                         # Store the link relationship
@@ -725,7 +804,6 @@ class Crawler:
             except Exception as e:
                 pass
                 
-
     def skip_visited_url(self, url):
         """Check if URL has been visited and properly remove it from frontier if so"""
         cursor = self.db.conn.cursor()

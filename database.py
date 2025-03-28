@@ -143,8 +143,8 @@ class Database:
             
             # Add to frontier
             cursor.execute(
-                "INSERT INTO crawldb.page (site_id, url, page_type_code) VALUES (%s, %s, 'FRONTIER')",
-                (site_id, url)
+                "INSERT INTO crawldb.page (site_id, url, page_type_code, priority) VALUES (%s, %s, 'FRONTIER', %s)",
+                (site_id, url, priority)
             )
             self.conn.commit()  # Explicit commit needed even with autocommit
             return True
@@ -207,12 +207,13 @@ class Database:
                         print(f"Error looking for keyword '{keyword}': {e}")
 
             try:
-                # If no preferential match found, get any URL
+                # If no preferential match found, get URL with highest priority
                 cursor.execute("""
                     SELECT url FROM crawldb.page 
                     WHERE page_type_code = 'FRONTIER'
                     AND url NOT LIKE '%sitemap%.xml%'
                     AND url NOT LIKE '%/assets/sitemap/%'
+                    ORDER BY priority ASC
                     LIMIT 1
                 """)
                 result = cursor.fetchone()
@@ -246,7 +247,7 @@ class Database:
         finally:
             cursor.close()
     
-    def update_page_with_hash(self, url, html_content, status_code, content_hash):
+    def update_page_with_hash_and_minhash(self, url, html_content, status_code, content_hash, content_minhash):
         """Update page with HTML content and hash - respecting existing duplicate marking"""
         cursor = self.conn.cursor()
         try:
@@ -282,18 +283,19 @@ class Database:
                     SET html_content = %s, 
                         http_status_code = %s,
                         page_type_code = 'HTML',
-                        content_hash = %s
+                        content_hash = %s, 
+                        content_minhash = %s,
                     WHERE id = %s
                     """,
-                    (html_content, status_code, content_hash, page_id)
+                    (html_content, status_code, content_hash, content_minhash, page_id)
                 )
             else:
                 cursor.execute(
                     """
-                    INSERT INTO crawldb.page (url, html_content, http_status_code, page_type_code, content_hash) 
+                    INSERT INTO crawldb.page (url, html_content, http_status_code, page_type_code, content_hash, content_minhash) 
                     VALUES (%s, %s, %s, 'HTML', %s) RETURNING id
                     """,
-                    (url, html_content, status_code, content_hash)
+                    (url, html_content, status_code, content_hash, content_minhash)
                 )
                 page_id = cursor.fetchone()[0]
             
@@ -424,6 +426,28 @@ class Database:
             return None, None
         except Exception as e:
             print(f"Error checking content hash: {e}")
+            return None, None
+        finally:
+            cursor.close()
+
+    def get_duplicate_page_by_minhash(self, existing_minhash):
+        """Get the ID of a duplicate page based on minhash"""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT id, url 
+                FROM crawldb.page 
+                WHERE content_minhash = %s AND page_type_code = 'HTML'
+                ORDER BY accessed_time ASC
+                LIMIT 1
+            """, (existing_minhash,))
+            
+            result = cursor.fetchone()
+            if result:
+                return result[0], result[1]  # id, url
+            return None, None
+        except Exception as e:
+            print(f"Error checking minhash: {e}")
             return None, None
         finally:
             cursor.close()
