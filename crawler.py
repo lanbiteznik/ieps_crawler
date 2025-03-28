@@ -613,6 +613,7 @@ class Crawler:
                     print(f"  WARNING: Empty HTML content for {url}")
                     # Still update the page status even if content is empty
                     page_id = self.db.update_page(url, None, response.status_code, 'HTML')
+                    print(f"  Created empty HTML page with ID: {page_id}")
                 
                 # Extract links
                 links = self.extract_links(html_content, url)
@@ -636,7 +637,7 @@ class Crawler:
                 return page_id
                 
         except Exception as e:
-            print(f"  Error crawling {url}: {e}")
+            print(f"  ERRRRRRRORRRR CRAWLING  {url}: {e}")
             # Mark as FRONTIER again in case of error
             if url not in self.visited:
                 self.db.add_page_to_frontier(url)
