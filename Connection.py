@@ -132,7 +132,17 @@ class PostgresDB:
             print("Error inserting page:", e)
             self.conn.rollback()
             return None  # Return None in case of failure
-     
+        
+    def get_all_urls(self):
+        """Fetches all URLs from the crawldb.page table and returns them as a set."""
+        try:
+            self.cursor.execute("SELECT url FROM crawldb.page;")
+            urls = {row[0] for row in self.cursor.fetchall()}  # Fetch all and convert to a set
+            return urls
+        except Exception as e:
+            print("Error fetching URLs:", e)
+            return set()  # Return an empty set in case of failure
+
     def close(self):
         """Closes the database connection."""
         if self.cursor:

@@ -325,6 +325,8 @@ class SpiderMonkey:
         return priority
     
     def start_crawler(self, start_url, num_workers=4):
+
+        self.set_visited_urls()
         print("Can i crawl?:", self.can_crawl(start_url))
         print("sitemap: ", self.get_sitemap_urls(urljoin(start_url, "/sitemap.xml")))
 
@@ -343,7 +345,17 @@ class SpiderMonkey:
             thread.join()
         
         db.close()
-    
+
+    def set_visited_urls(self):
+        """Fetch all visited URLs and push the last one into a priority queue."""
+        self.visited_urls = db.get_all_urls()  # Fetch all URLs as a set
+
+        if self.visited_urls:  # Ensure the set is not empty
+            last_url = self.visited_urls.pop()  # Remove and get the last item
+            heapq.heappush(self.url_queue, (0, last_url))  # Push it into the priority queue
+
+            print(f"Pushed to queue: {last_url}")
+
 if __name__ == "__main__":
     spider = SpiderMonkey(domain, max_workers=10, max_pages=5000)
     spider.start_crawler(domain, num_workers=10)
