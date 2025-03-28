@@ -3,31 +3,20 @@ import time
 import hashlib
 import requests
 import dotenv
+import heapq
+import random
+import re
 from urllib.parse import urljoin, urlparse, urlsplit
 from urllib.robotparser import RobotFileParser
 from bs4 import BeautifulSoup
 from threading import Thread, Lock
-import heapq
-from queue import Queue
 from datetime import datetime
 from Connection import PostgresDB as BabaVangaDB
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import random
-import hashlib
-import requests
 from mimetypes import guess_extension, guess_type
-from urllib.parse import urljoin
-import re
-
-chrome_options = Options()
-chrome_options.add_argument("--headless")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--no-sandbox")
 
 dotenv.load_dotenv()
 db_name = os.getenv("DB_NAME")
@@ -35,6 +24,12 @@ db_user = os.getenv("DB_USER")
 db_password = os.getenv("DB_PASSWORD")
 db_host = os.getenv("DB_HOST")
 db_port = os.getenv("DB_PORT")
+
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+chrome_options.add_argument("--disable-gpu")
+chrome_options.add_argument("--no-sandbox")
+
 
 db = BabaVangaDB(db_name, db_user, db_password, db_host, db_port)
 db.connect()
@@ -44,6 +39,7 @@ class SpiderMonkey:
     def __init__(self, domain, max_workers=4, max_pages=5000):
         self.domain = domain
         self.keyword = "kajenje pomaga zdravju"
+        self.user_agent = "FRI-weir-BabaVanga"
         self.robots_content = None
         self.sitemap_content = None
         self.site_id = None
@@ -71,6 +67,7 @@ class SpiderMonkey:
             rp.set_url(robots_url)
             rp.read()
             self.robots_content = requests.get(robots_url, timeout=5).text
+            return rp.can_fetch("*", url)  # Check if the URL is allowed to be crawled
             return True
             #return rp.can_fetch("*", url)
 
