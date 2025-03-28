@@ -31,7 +31,6 @@ def test_database_operations():
         # Connect using environment variables
         db = Database()
         print("Database connection successful!")
-        
         # 1. Test adding pages to frontier
         print("\n----- Testing frontier operations -----")
         test_urls = [
@@ -240,35 +239,41 @@ def test_real_world_extraction():
         db = Database()
         crawler = Crawler(["https://example.com"], max_pages=1)
         
-        # Test different content types with stable websites
+        # Updated test cases with more reliable URLs and better error handling
         test_cases = [
-            # HTML page - FRI website
+            # HTML page - FRI website (both domains to try)
             {
-                "url": "https://www.fri.uni-lj.si/",
+                "url": "https://fri.uni-lj.si/",
                 "description": "FRI homepage (standard HTML)",
                 "expected_type": "HTML"
             },
-            # HTML page with many links
+            # HTML page with many links - Wikipedia is very stable
             {
                 "url": "https://en.wikipedia.org/wiki/Web_crawler",
                 "description": "Wikipedia page (rich HTML with many links)",
                 "expected_type": "HTML"
             },
-            # Forum page with multiple sections
+            # Forum page - critical for validation requirements
             {
                 "url": "https://med.over.net/forum/",
                 "description": "Med.over.net forum (rich content structure)",
                 "expected_type": "HTML"
             },
-            # Binary PDF content - stable sample PDF
+            # Binary PDF content - multiple reliable sources
             {
-                "url": "https://www.africau.edu/images/default/sample.pdf",
-                "description": "Sample PDF file (binary content)",
+                "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+                "description": "W3C test PDF file (binary content)",
+                "expected_type": "BINARY"
+            },
+            # Backup PDF in case the first one fails
+            {
+                "url": "https://pdfobject.com/pdf/sample.pdf", 
+                "description": "Alternative sample PDF file",
                 "expected_type": "BINARY"
             },
             # Image-heavy page
             {
-                "url": "https://www.fri.uni-lj.si/sl/galerija",
+                "url": "https://fri.uni-lj.si/sl/galerija",
                 "description": "FRI gallery (image-heavy page)",
                 "expected_type": "HTML"
             }
@@ -280,12 +285,31 @@ def test_real_world_extraction():
             print(f"URL: {url}")
             
             try:
+                # Adding proper headers to avoid being blocked
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                
                 # Check if URL is accessible before trying to crawl
-                response = requests.head(url, timeout=10)
+                response = requests.get(
+                    url, 
+                    timeout=15,  # Increased timeout for reliability
+                    stream=True,
+                    allow_redirects=True,
+                    headers=headers
+                )
+                
                 if response.status_code != 200:
                     print(f"❌ URL returned status code {response.status_code}. Skipping test.")
                     continue
-                    
+                
+                # Get content type before closing
+                content_type = response.headers.get('Content-Type', '')
+                print(f"Content-Type: {content_type}")
+                
+                # Stop the response download since we just needed the status code
+                response.close()
+                
                 # Add page to frontier and reset crawler's visited set for this test
                 crawler.visited = set()
                 db.add_page_to_frontier(url)
@@ -415,68 +439,375 @@ def test_real_world_extraction():
         print(f"Error during real-world testing: {e}")
 
 def test_duplicate_detection():
-    """Test dedicated to duplicate content detection"""
+    """Test duplicate content detection with real-world examples"""
     try:
         print("\n===== TESTING DUPLICATE DETECTION =====\n")
         
         db = Database()
         crawler = Crawler(["https://example.com"], max_pages=1)
         
-        # Create unique test content
-        unique_content = f"<html><body>Unique test content {time.time()}</body></html>"
+        # 1. Real-world duplicate pairs - pages that commonly have identical content
+        duplicate_pairs = [
+            # University pages often have identical content on different paths
+           
+            # Wikipedia pages with redirects
+            ("https://en.wikipedia.org/wiki/Computer_Science", 
+             "https://en.wikipedia.org/wiki/Computer_science")
+        ]
+        
+        # 2. Generate unique content hash that won't conflict with existing pages
+        unique_content = f"<html><body>Test duplicate content {time.time()}</body></html>"
         content_hash = crawler.compute_content_hash(unique_content)
         
-        # Use temporary test URLs that won't conflict with real sites
-        url1 = f"https://test-{int(time.time())}-1.example.com/"
-        url2 = f"https://test-{int(time.time())}-2.example.com/"
+        # 3. For testing, create controlled duplicate content
+        print("\nTesting with controlled content:")
+        url1 = f"https://test-dup-{int(time.time())}-1.example.com/"
+        url2 = f"https://test-dup-{int(time.time())}-2.example.com/"
         
         print(f"Test URL 1: {url1}")
         print(f"Test URL 2: {url2}")
+        
+        # First ensure any old test pages are cleaned up
+        # This prevents foreign key constraint issues
+        cleanup_urls = [url1, url2]
+        cursor = db.conn.cursor()
+        
+        for url in cleanup_urls:
+            try:
+                # First get page ID
+                cursor.execute("SELECT id FROM crawldb.page WHERE url = %s", (url,))
+                result = cursor.fetchone()
+                
+                if result:
+                    page_id = result[0]
+                    
+                    # Delete links first
+                    cursor.execute(
+                        "DELETE FROM crawldb.link WHERE from_page = %s OR to_page = %s", 
+                        (page_id, page_id)
+                    )
+                    
+                    # Then delete page
+                    cursor.execute("DELETE FROM crawldb.page WHERE id = %s", (page_id,))
+            except Exception as e:
+                # Non-critical error
+                pass
+        
+        db.conn.commit()
+        cursor.close()
         
         # Add to frontier and create first page
         db.add_page_to_frontier(url1)
         page_id1 = db.update_page_with_hash(url1, unique_content, 200, content_hash)
         print(f"Created first page with hash: {content_hash}")
         
-        # Check for duplicate
+        # Check for duplicate detection
         db.add_page_to_frontier(url2)
         duplicate_id, duplicate_url = db.check_content_hash_exists(content_hash)
         
         if duplicate_id and duplicate_url == url1:
             print("✅ Duplicate detection successful")
-            # Mark as duplicate
+            # Mark as duplicate - this should set page_type_code='DUPLICATE'
             success = db.mark_as_duplicate(url2, url1)
             print(f"Marked as duplicate: {success}")
             
-            # Verify in database
+            # Verify in database using page_type_code
             cursor = db.conn.cursor()
             cursor.execute(
-                "SELECT duplicate_id FROM crawldb.page WHERE url = %s", 
+                "SELECT page_type_code FROM crawldb.page WHERE url = %s", 
                 (url2,)
             )
             result = cursor.fetchone()
-            if result and result[0] == page_id1:
-                print("✅ Database successfully updated with duplicate relationship")
+            if result and result[0] == 'DUPLICATE':
+                print("✅ Database successfully marked page as duplicate")
+                
+                # Additional check for successful crawler integration
+                db.update_page_with_hash(url2, unique_content, 200, content_hash)
+                cursor.execute(
+                    "SELECT page_type_code FROM crawldb.page WHERE url = %s", 
+                    (url2,)
+                )
+                verify = cursor.fetchone()
+                if verify and verify[0] == 'DUPLICATE':
+                    print("✅ Duplicate detection persists through page updates")
+                else:
+                    print("❌ Page duplicate status was incorrectly changed")
             else:
-                print("❌ Database duplicate relationship not set correctly")
+                print("❌ Page not properly marked as duplicate")
             cursor.close()
         else:
             print("❌ Duplicate detection failed")
         
-        # Clean up test data
-        cursor = db.conn.cursor()
-        cursor.execute("DELETE FROM crawldb.page WHERE url IN (%s, %s)", (url1, url2))
-        db.conn.commit()
-        cursor.close()
+        # Clean up test data properly
+        clean_test_data(db, [url1, url2])
         
         print("\n===== DUPLICATE DETECTION TEST COMPLETED =====\n")
         
     except Exception as e:
         print(f"Error during duplicate detection testing: {e}")
 
+def clean_test_data(db, urls):
+    """Helper method to properly clean test data respecting foreign keys"""
+    cursor = db.conn.cursor()
+    try:
+        # Get all related page IDs
+        cursor.execute(
+            "SELECT id FROM crawldb.page WHERE url IN %s",
+            (tuple(urls),)
+        )
+        page_ids = [row[0] for row in cursor.fetchall()]
+        
+        if page_ids:
+            # Format for SQL IN clause
+            if len(page_ids) == 1:
+                id_clause = f"({page_ids[0]})"
+            else:
+                id_clause = tuple(page_ids)
+            
+            # Delete from all related tables in the right order
+            # 1. Delete links first (they reference pages)
+            cursor.execute(f"""
+                DELETE FROM crawldb.link 
+                WHERE from_page IN {id_clause}
+                OR to_page IN {id_clause}
+            """)
+            
+            # 2. Delete images (they reference pages)
+            cursor.execute(f"""
+                DELETE FROM crawldb.image
+                WHERE page_id IN {id_clause}
+            """)
+            
+            # 3. Delete page_data (they reference pages)
+            cursor.execute(f"""
+                DELETE FROM crawldb.page_data
+                WHERE page_id IN {id_clause}
+            """)
+            
+            # 4. Now it's safe to delete the pages
+            cursor.execute(f"DELETE FROM crawldb.page WHERE id IN {id_clause}")
+        
+        db.conn.commit()
+        print("Test data successfully cleaned up")
+    except Exception as e:
+        print(f"Cleanup error (non-critical): {e}")
+    finally:
+        cursor.close()
+
+def test_preferential_crawling():
+    """Test preferential crawling based on keywords in URLs"""
+    print("\n===== PREFERENTIAL CRAWLING TEST =====\n")
+    
+    db = Database()
+    try:
+        # Clear existing test data
+        clean_test_data(db, [
+            "https://example.com/about",
+            "https://example.com/research/papers",
+            "https://example.com/contact",
+            "https://med.over.net/forum/zdravje",
+            "https://example.com/news",
+            "https://fri.uni-lj.si/sl/raziskave/projects",
+            "https://med.over.net/health/article",
+            "https://example.com/services"
+        ])
+        
+        # Set up preferential keywords
+        keywords = ["research", "forum", "project", "health"]
+        print(f"Setting preferential keywords: {keywords}")
+        db.set_preferential_keywords(keywords)
+        
+        # Add test URLs to frontier
+        test_urls = [
+            "https://example.com/about",
+            "https://example.com/research/papers",
+            "https://example.com/contact",
+            "https://med.over.net/forum/zdravje",
+            "https://example.com/news",
+            "https://fri.uni-lj.si/sl/raziskave/projects",
+            "https://med.over.net/health/article",
+            "https://example.com/services"
+        ]
+        print("Adding test URLs to frontier:")
+        for url in test_urls:
+            print(f"  - {url}")
+            success = db.add_page_to_frontier(url)
+            if not success:
+                print(f"    ❌ Failed to add {url}")
+        
+        # IMPORTANT: Verify URLs are actually in the frontier
+        found = db.verify_frontier_urls(test_urls)
+        if found == 0:
+            print("❌ No test URLs were added to the frontier - aborting test")
+            return
+            
+        # Continue with the test...
+        
+        # Retrieve URLs in preferential order
+        print("\nRetrieving URLs in preferential order:")
+        retrieved_urls = []
+        for i in range(len(test_urls)):
+            next_url = db.get_next_frontier_page_preferential()
+            if next_url:
+                retrieved_urls.append(next_url)
+                print(f"  {i+1}. {next_url}")
+                db.mark_page_as_processed(next_url)  # Remove from frontier
+            else:
+                print(f"  {i+1}. No more URLs in frontier")
+                break
+        
+        # Analyze results
+        print("\nAnalyzing results:")
+        keyword_urls = [url for url in test_urls if any(keyword in url.lower() for keyword in keywords)]
+        nonkeyword_urls = [url for url in test_urls if not any(keyword in url.lower() for keyword in keywords)]
+        
+        print(f"URLs containing keywords: {len(keyword_urls)}")
+        print(f"URLs without keywords: {len(nonkeyword_urls)}")
+        
+        # Check if keyword URLs were prioritized
+        keyword_positions = []
+        for url in keyword_urls:
+            if url in retrieved_urls:
+                position = retrieved_urls.index(url) + 1
+                keyword_positions.append(position)
+                
+        if keyword_positions:
+            avg_keyword_pos = sum(keyword_positions) / len(keyword_positions)
+            avg_expected_pos = (len(keyword_urls) + 1) / 2  # Expected average position if keywords are prioritized
+            
+            print(f"Average position of keyword URLs: {avg_keyword_pos:.1f}")
+            print(f"Expected average position if prioritized: {avg_expected_pos:.1f}")
+            
+            if avg_keyword_pos <= (len(test_urls) / 2):
+                print("✅ Keyword URLs were retrieved with higher priority")
+            else:
+                print("❌ Keyword prioritization may not be working correctly")
+        else:
+            print("❌ No keyword URLs were retrieved")
+        
+        # Test individual keyword behavior
+        print("\nTesting individual keywords:")
+        
+        # Clear frontier again
+        cursor = db.conn.cursor()
+        cursor.execute("DELETE FROM crawldb.page WHERE page_type_code = 'FRONTIER'")
+        db.conn.commit()
+        cursor.close()
+        
+        # Add URL for each keyword
+        keyword_specific_urls = {}
+        for keyword in keywords:
+            url = f"https://example.com/{keyword}-specific-page"
+            db.add_page_to_frontier(url)
+            keyword_specific_urls[keyword] = url
+        
+        # Test each keyword
+        for keyword in keywords:
+            # Set just one keyword
+            db.set_preferential_keywords([keyword])
+            
+            # Get next URL
+            next_url = db.get_next_frontier_page_preferential()
+            
+            # Check if matches expected URL
+            if next_url == keyword_specific_urls[keyword]:
+                print(f"  ✅ Keyword '{keyword}' - URL correctly prioritized: {next_url}")
+            else:
+                print(f"  ❌ Keyword '{keyword}' - URL not prioritized. Got: {next_url}")
+            
+            # Mark as processed to avoid influencing next test
+            if next_url:
+                db.mark_page_as_processed(next_url)
+        
+        print("\n===== PREFERENTIAL CRAWLING TEST COMPLETED =====\n")
+        
+    except Exception as e:
+        print(f"Error during preferential crawling testing: {e}")
+    # 6. Clean up test data properly
+    try:
+        cursor = db.conn.cursor()
+        # Get all URLs to clean up
+        cursor.execute("""
+            SELECT url FROM crawldb.page 
+            WHERE page_type_code = 'FRONTIER' 
+            OR url LIKE 'https://example.com/%'
+        """)
+        cleanup_urls = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        
+        # Use the helper function to clean up
+        clean_test_data(db, cleanup_urls)
+    except Exception as e:
+        print(f"Cleanup error (non-critical): {e}")
+
+def test_sitemap_extraction_from_robots():
+    """Test extraction and processing of sitemaps from robots.txt"""
+    try:
+        print("\n===== TESTING SITEMAP EXTRACTION FROM ROBOTS.TXT =====\n")
+        
+        # Create database instance
+        db = Database()
+        crawler = Crawler(["https://www.sitemaps.org"], max_pages=1)
+        
+        # Test with the official sitemaps.org domain - perfect for this test
+        test_domain = "www.sitemaps.org"
+        robots_url = "https://www.sitemaps.org/robots.txt"
+        expected_sitemap_url = "https://www.sitemaps.org/sitemap.xml"
+        
+        print(f"Testing with: {robots_url}")
+        
+        # 1. Fetch the robots.txt content
+        try:
+            response = requests.get(robots_url, timeout=10)
+            if response.status_code == 200:
+                robots_content = response.text
+                print(f"✅ Found robots.txt with content length: {len(robots_content)} bytes")
+                print(f"Robots.txt content snippet:\n{robots_content[:200]}...")
+                
+                # Store the robots content
+                site_id = db.add_site(test_domain, robots_content)
+                print(f"Added site with ID: {site_id}")
+                
+                # 2. Parse robots.txt to extract sitemap
+                base_url = f"https://{test_domain}/"
+                robots_parser = crawler.get_robots_parser(base_url)
+                
+                if hasattr(robots_parser, 'sitemaps') and robots_parser.sitemaps:
+                    print(f"✅ Found {len(robots_parser.sitemaps)} sitemaps in robots.txt:")
+                    for sitemap_url in robots_parser.sitemaps:
+                        print(f"   - {sitemap_url}")
+                    
+                    # 3. Process the first sitemap
+                    crawler.process_sitemap(base_url)
+                    
+                    # 4. Check if sitemap was stored in database
+                    cursor = db.conn.cursor()
+                    cursor.execute("SELECT sitemap_content FROM crawldb.site WHERE domain = %s", (test_domain,))
+                    result = cursor.fetchone()
+                    cursor.close()
+                    
+                    if result and result[0]:
+                        print(f"✅ Sitemap content stored in database, length: {len(result[0])} bytes")
+                        print(f"Sitemap content snippet:\n{result[0][:200]}...")
+                    else:
+                        print("❌ Sitemap content not stored in database")
+                else:
+                    print("❌ No sitemaps found in robots.txt")
+            else:
+                print(f"❌ Failed to fetch robots.txt, status code: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Error fetching robots.txt: {e}")
+        
+        print("\n===== SITEMAP EXTRACTION TEST COMPLETED =====\n")
+        
+    except Exception as e:
+        print(f"Error during sitemap extraction testing: {e}")
+
 if __name__ == "__main__":
     # Comment out these if you only want to run the real-world test
     # test_database_operations()
     # test_crawler_extraction()
-    test_real_world_extraction()
-    test_duplicate_detection()
+    #test_real_world_extraction()
+    #test_duplicate_detection()
+    test_preferential_crawling()
+    #test_sitemap_extraction_from_robots()

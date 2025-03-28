@@ -3,18 +3,25 @@ from crawler import Crawler
 import argparse
 import time
 from datetime import datetime
+from database import Database
 
-def run_worker(seed_urls, max_pages, worker_id):
-    print(f"Starting worker {worker_id} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Worker {worker_id} will crawl up to {max_pages} pages")
+def run_worker(seed_urls, max_pages, worker_id, keywords=None):
     try:
-        crawler = Crawler(seed_urls, max_pages=max_pages)
+        print(f"Starting worker {worker_id} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Worker {worker_id} will crawl up to {max_pages} pages")
+        
+        # Initialize database for this worker
+        db = Database()
+        if keywords:
+            db.set_preferential_keywords(keywords)
+        
+        # Initialize crawler
+        crawler = Crawler(seed_urls, max_pages)
         crawler.start()
-        print(f"Worker {worker_id} finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
         return f"Worker {worker_id} completed successfully"
     except Exception as e:
         print(f"Worker {worker_id} encountered an error: {e}")
-        # Return the error rather than raising it
         return f"Worker {worker_id} failed: {str(e)}"
     
 def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
@@ -23,16 +30,25 @@ def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
     
     # The med.over.net site with forum sections that will provide good crawling depth
     seed_urls = [
-      
        "https://www.fri.uni-lj.si/",
-       "https://fri.uni-lj.si/sl/studij",
-       "https://fri.uni-lj.si/sl/raziskave",
-       "https://fri.uni-lj.si/sl/raziskave/projekti"
-      
+       "https://fri.uni-lj.si/sl/studij/",
+       "https://fri.uni-lj.si/sl/raziskave/",
+       "https://fri.uni-lj.si/sl/raziskave/projekti/",
+       #"https://med.over.net/",
+       #"https://med.over.net/forum/",
+       #"https://med.over.net/forum/zdravje/"
+    ]
+    
+    # Define preferential crawling keywords
+    crawl_keywords = [
+        "raziskave", "research", 
+        "projekti", "projects",
+        "erasmus"
     ]
     
     print(f"Starting crawler with {num_workers} workers")
     print(f"Each worker will crawl up to {max_pages_per_worker} pages")
+    print(f"Preferential keywords: {crawl_keywords}")
     print(f"Total target: {total_pages} pages")
     print(f"Starting time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     from database import Database
@@ -41,6 +57,9 @@ def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
     if invalid_count > 0:
         print(f"WARNING: Found {invalid_count} invalid domains in the site table.")
         print("These will not be accessible via web browsers.")
+    
+    # Set preferential keywords
+    db.set_preferential_keywords(crawl_keywords)
     
     start_time = time.time()
     
@@ -58,7 +77,13 @@ def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
     with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
         # Submit tasks and collect futures
         for i in range(num_workers):
-            future = executor.submit(run_worker, worker_seeds[i], max_pages_per_worker, i)
+            future = executor.submit(
+                run_worker, 
+                worker_seeds[i], 
+                max_pages_per_worker, 
+                i, 
+                crawl_keywords
+            )
             futures.append(future)
         
         # Wait for all futures to complete

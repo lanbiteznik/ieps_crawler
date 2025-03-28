@@ -53,6 +53,22 @@ class Database:
             if not cursor.fetchone():
                 print("Adding content_hash column to page table...")
                 cursor.execute("ALTER TABLE crawldb.page ADD COLUMN content_hash VARCHAR(32)")
+            
+            # Add duplicate_id column if it doesn't exist
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_schema = 'crawldb' 
+                AND table_name = 'page' 
+                AND column_name = 'duplicate_id'
+            """)
+            if not cursor.fetchone():
+                print("Adding duplicate_id column to page table...")
+                cursor.execute("""
+                    ALTER TABLE crawldb.page ADD COLUMN IF NOT EXISTS duplicate_id integer;
+                    ALTER TABLE crawldb.page ADD CONSTRAINT fk_duplicate_page FOREIGN KEY (duplicate_id) 
+                        REFERENCES crawldb.page(id);
+                """)
         except Exception as e:
             print(f"Error initializing schema: {e}")
         finally:
@@ -106,7 +122,7 @@ class Database:
         cursor.close()
         return site_id[0] if site_id else None
     
-    def add_page_to_frontier(self, url):
+    def add_page_to_frontier(self, url, priority=0):
         """Add a URL to the frontier if it's not already in the database"""
         cursor = self.conn.cursor()
         try:
@@ -121,13 +137,21 @@ class Database:
             
             # Get or create site
             site_id = self.add_site(domain)
+            if site_id is None:  # This can happen if domain validation fails
+                print(f"⚠️ Could not add site for URL: {url}")
+                return False
             
             # Add to frontier
             cursor.execute(
                 "INSERT INTO crawldb.page (site_id, url, page_type_code) VALUES (%s, %s, 'FRONTIER')",
                 (site_id, url)
             )
+            self.conn.commit()  # Explicit commit needed even with autocommit
             return True
+        except Exception as e:
+            print(f"Error adding page to frontier: {e}")
+            self.conn.rollback()
+            return False
         finally:
             cursor.close()
     
@@ -157,20 +181,47 @@ class Database:
             cursor.close()
     
     def get_next_frontier_page_preferential(self):
-        """Get next page from frontier with preference for certain URL patterns"""
+        """Get next page from frontier with preference for URLs containing keywords"""
         cursor = self.conn.cursor()
         try:
-            # Try any frontier page
-            cursor.execute("""
-                SELECT url FROM crawldb.page 
-                WHERE page_type_code = 'FRONTIER'
-                AND url NOT LIKE '%sitemap%.xml%'
-                AND url NOT LIKE '%/assets/sitemap/%'
-                LIMIT 1
-            """)
-            result = cursor.fetchone()
-            # CRITICAL FIX: Handle None result safely
-            return result[0] if result else None
+            # First check if we have preferential keywords defined
+            if hasattr(self, 'preferential_keywords') and self.preferential_keywords:
+                # Try to find pages matching our keywords first
+                for keyword in self.preferential_keywords:
+                    try:
+                        # Look for keyword in URL
+                        cursor.execute("""
+                            SELECT url FROM crawldb.page 
+                            WHERE page_type_code = 'FRONTIER'
+                            AND url NOT LIKE '%sitemap%.xml%'
+                            AND url NOT LIKE '%/assets/sitemap/%'
+                            AND url ILIKE %s
+                            LIMIT 1
+                        """, (f'%{keyword}%',))
+                        
+                        result = cursor.fetchone()
+                        if result is not None and len(result) > 0:  # Explicitly check for None and length
+                            print(f"Found preferential URL matching keyword '{keyword}': {result[0]}")
+                            return result[0]
+                    except Exception as e:
+                        print(f"Error looking for keyword '{keyword}': {e}")
+
+            try:
+                # If no preferential match found, get any URL
+                cursor.execute("""
+                    SELECT url FROM crawldb.page 
+                    WHERE page_type_code = 'FRONTIER'
+                    AND url NOT LIKE '%sitemap%.xml%'
+                    AND url NOT LIKE '%/assets/sitemap/%'
+                    LIMIT 1
+                """)
+                result = cursor.fetchone()
+                if result is not None and len(result) > 0:  # Explicit length check
+                    return result[0]
+                return None
+            except Exception as e:
+                print(f"Error retrieving any frontier page: {e}")
+                return None
         except Exception as e:
             print(f"Database error getting frontier page: {e}")
             return None
@@ -196,28 +247,60 @@ class Database:
             cursor.close()
     
     def update_page_with_hash(self, url, html_content, status_code, content_hash):
-        """Update page with HTML content and hash"""
+        """Update page with HTML content and hash - respecting existing duplicate marking"""
         cursor = self.conn.cursor()
         try:
+            # First check if page exists and if it's already a DUPLICATE
             cursor.execute(
-                """
-                UPDATE crawldb.page 
-                SET html_content = %s, http_status_code = %s, 
-                    accessed_time = %s, page_type_code = 'HTML', content_hash = %s
-                WHERE url = %s
-                RETURNING id
-                """,
-                (html_content, status_code, datetime.now(), content_hash, url)
+                "SELECT id, page_type_code FROM crawldb.page WHERE url = %s", 
+                (url,)
             )
-            
             result = cursor.fetchone()
+            
             if result:
-                page_id = result[0]
-                self.conn.commit()
-                return page_id
-            return None
+                page_id, page_type = result
+                
+                # If page is already marked as a duplicate, don't change its status
+                if page_type == 'DUPLICATE':
+                    print(f"Skipping content update for {url} - already marked as DUPLICATE")
+                    # Only update the content hash without changing the page type
+                    cursor.execute(
+                        """
+                        UPDATE crawldb.page 
+                        SET content_hash = %s
+                        WHERE id = %s
+                        """,
+                        (content_hash, page_id)
+                    )
+                    self.conn.commit()
+                    return page_id
+                    
+                # Otherwise, update as normal
+                cursor.execute(
+                    """
+                    UPDATE crawldb.page 
+                    SET html_content = %s, 
+                        http_status_code = %s,
+                        page_type_code = 'HTML',
+                        content_hash = %s
+                    WHERE id = %s
+                    """,
+                    (html_content, status_code, content_hash, page_id)
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO crawldb.page (url, html_content, http_status_code, page_type_code, content_hash) 
+                    VALUES (%s, %s, %s, 'HTML', %s) RETURNING id
+                    """,
+                    (url, html_content, status_code, content_hash)
+                )
+                page_id = cursor.fetchone()[0]
+            
+            self.conn.commit()
+            return page_id
         except Exception as e:
-            print(f"Error updating page with hash: {e}")
+            print(f"Error updating page: {e}")
             self.conn.rollback()
             return None
         finally:
@@ -292,33 +375,55 @@ class Database:
         finally:
             cursor.close()
     
-    def mark_as_duplicate(self, url, original_url):
-        """Mark a page as duplicate of another page"""
+    def mark_as_duplicate(self, duplicate_url, original_url):
+        """Mark a page as a duplicate of another page"""
         cursor = self.conn.cursor()
         try:
+            # Get the ID of the original page
+            cursor.execute("SELECT id FROM crawldb.page WHERE url = %s", (original_url,))
+            original_id = cursor.fetchone()
+            if not original_id:
+                print(f"Original URL not found: {original_url}")
+                return False
+            original_id = original_id[0]
+            
+            # Update the duplicate page - set page_type_code AND duplicate_id
             cursor.execute(
                 """
                 UPDATE crawldb.page 
-                SET page_type_code = 'DUPLICATE', accessed_time = %s, html_content = NULL
+                SET page_type_code = 'DUPLICATE', 
+                    html_content = NULL,
+                    duplicate_id = %s
                 WHERE url = %s
                 """,
-                (datetime.now(), url)
+                (original_id, duplicate_url)
             )
+            self.conn.commit()
             return True
+        except Exception as e:
+            print(f"Error marking page as duplicate: {e}")
+            return False
         finally:
             cursor.close()
     
     def check_content_hash_exists(self, content_hash):
-        """Check if page with same content hash exists"""
+        """Check if content hash exists in database, return first page with this hash (oldest)"""
         cursor = self.conn.cursor()
         try:
-            cursor.execute(
-                "SELECT id, url FROM crawldb.page WHERE content_hash = %s LIMIT 1",
-                (content_hash,)
-            )
+            cursor.execute("""
+                SELECT id, url 
+                FROM crawldb.page 
+                WHERE content_hash = %s AND page_type_code = 'HTML'
+                ORDER BY accessed_time ASC
+                LIMIT 1
+            """, (content_hash,))
+            
             result = cursor.fetchone()
             if result:
-                return result[0], result[1]
+                return result[0], result[1]  # id, url
+            return None, None
+        except Exception as e:
+            print(f"Error checking content hash: {e}")
             return None, None
         finally:
             cursor.close()
@@ -475,5 +580,72 @@ class Database:
                 print("No invalid site entries found.")
                 
             return len(all_invalid)
+        finally:
+            cursor.close()
+
+    def set_preferential_keywords(self, keywords):
+        """Set keywords for preferential crawling"""
+        if keywords and isinstance(keywords, list):
+            self.preferential_keywords = keywords
+            print(f"Set preferential crawling keywords: {self.preferential_keywords}")
+            return True
+        return False
+
+    def clean_test_urls(self, urls):
+        """Clean up test URLs in a way that respects foreign key constraints"""
+        cursor = self.conn.cursor()
+        try:
+            # First get the page IDs 
+            page_ids = []
+            for url in urls:
+                cursor.execute("SELECT id FROM crawldb.page WHERE url = %s", (url,))
+                result = cursor.fetchone()
+                if result:
+                    page_ids.append(result[0])
+            
+            if page_ids:
+                # Delete links first
+                for page_id in page_ids:
+                    cursor.execute(
+                        "DELETE FROM crawldb.link WHERE from_page = %s OR to_page = %s", 
+                        (page_id, page_id)
+                    )
+                
+                # Now it's safe to delete the pages
+                for url in urls:
+                    cursor.execute("DELETE FROM crawldb.page WHERE url = %s", (url,))
+            
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error cleaning test data: {e}")
+            return False
+        finally:
+            cursor.close()
+
+    def verify_frontier_urls(self, expected_urls):
+        """Debug method: verify that URLs are actually in the frontier"""
+        cursor = self.conn.cursor()
+        try:
+            # Check how many URLs are in the frontier
+            cursor.execute("SELECT COUNT(*) FROM crawldb.page WHERE page_type_code = 'FRONTIER'")
+            count = cursor.fetchone()[0]
+            print(f"Total frontier URLs: {count}")
+            
+            # Check how many of our expected URLs are in the frontier
+            placeholders = ','.join(['%s'] * len(expected_urls))
+            cursor.execute(f"SELECT url FROM crawldb.page WHERE page_type_code = 'FRONTIER' AND url IN ({placeholders})", 
+                         tuple(expected_urls))
+            found_urls = [row[0] for row in cursor.fetchall()]
+            print(f"Found {len(found_urls)} of {len(expected_urls)} expected URLs in the frontier")
+            
+            # Show which URLs are missing
+            missing = set(expected_urls) - set(found_urls)
+            if missing:
+                print("Missing URLs:")
+                for url in missing:
+                    print(f"  - {url}")
+                    
+            return len(found_urls)
         finally:
             cursor.close()
