@@ -181,50 +181,53 @@ class Database:
             cursor.close()
     
     def get_next_frontier_page_preferential(self):
-        """Get next page from frontier with preference for URLs containing keywords"""
+        """Get a page from frontier with preference for URLs containing keywords"""
         cursor = self.conn.cursor()
         try:
-            # First check if we have preferential keywords defined
+            # First check for preferential keywords
             if hasattr(self, 'preferential_keywords') and self.preferential_keywords:
-                # Try to find pages matching our keywords first
+                # Build dynamic query for preferential URLs
+                conditions = []
+                params = []
+                
                 for keyword in self.preferential_keywords:
-                    try:
-                        # Look for keyword in URL
-                        cursor.execute("""
-                            SELECT url FROM crawldb.page 
-                            WHERE page_type_code = 'FRONTIER'
-                            AND url NOT LIKE '%sitemap%.xml%'
-                            AND url NOT LIKE '%/assets/sitemap/%'
-                            AND url ILIKE %s
-                            LIMIT 1
-                        """, (f'%{keyword}%',))
-                        
-                        result = cursor.fetchone()
-                        if result is not None and len(result) > 0:  # Explicitly check for None and length
-                            print(f"Found preferential URL matching keyword '{keyword}': {result[0]}")
-                            return result[0]
-                    except Exception as e:
-                        print(f"Error looking for keyword '{keyword}': {e}")
-
-            try:
-                # If no preferential match found, get URL with highest priority
-                cursor.execute("""
+                    conditions.append("url ILIKE %s")
+                    params.append(f'%{keyword}%')
+                    
+                where_clause = " OR ".join(conditions)
+                
+                query = f"""
                     SELECT url FROM crawldb.page 
                     WHERE page_type_code = 'FRONTIER'
-                    AND url NOT LIKE '%sitemap%.xml%'
-                    AND url NOT LIKE '%/assets/sitemap/%'
-                    ORDER BY priority ASC
+                    AND ({where_clause})
+                    ORDER BY priority ASC, id ASC
                     LIMIT 1
-                """)
+                """
+                
+                cursor.execute(query, params)
                 result = cursor.fetchone()
-                if result is not None and len(result) > 0:  # Explicit length check
+                
+                if result:
+                    print(f"Selected preferential URL: {result[0]}")
                     return result[0]
-                return None
-            except Exception as e:
-                print(f"Error retrieving any frontier page: {e}")
-                return None
+                    
+                # If no preferential match, log it
+                print("No preferential URLs found in frontier, using regular selection")
+            
+            # Fall back to any frontier URL
+            cursor.execute("""
+                SELECT url FROM crawldb.page 
+                WHERE page_type_code = 'FRONTIER'
+                ORDER BY priority ASC, id ASC
+                LIMIT 1
+            """)
+            result = cursor.fetchone()
+            
+            if result:
+                return result[0]
+            return None
         except Exception as e:
-            print(f"Database error getting frontier page: {e}")
+            print(f"Error in preferential page selection: {e}")
             return None
         finally:
             cursor.close()
@@ -247,7 +250,7 @@ class Database:
         finally:
             cursor.close()
     
-    def update_page_with_hash_and_minhash(self, url, html_content, status_code, content_hash, content_minhash):
+    def update_page_with_hash_and_minhash(self, url, html_content, status_code, content_hash, content_minhash=None):
         """Update page with HTML content and hash - respecting existing duplicate marking"""
         cursor = self.conn.cursor()
         try:
@@ -276,7 +279,7 @@ class Database:
                     self.conn.commit()
                     return page_id
                     
-                # Otherwise, update as normal
+                # Otherwise, update as normal (FIXED: removed trailing comma)
                 cursor.execute(
                     """
                     UPDATE crawldb.page 
@@ -284,18 +287,24 @@ class Database:
                         http_status_code = %s,
                         page_type_code = 'HTML',
                         content_hash = %s, 
-                        content_minhash = %s,
+                        content_minhash = %s
                     WHERE id = %s
                     """,
                     (html_content, status_code, content_hash, content_minhash, page_id)
                 )
             else:
+                # Get domain and site_id
+                parsed_url = urlparse(url)
+                domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                site_id = self.add_site(domain)
+                
+                # Fixed: Fixed column/value count mismatch
                 cursor.execute(
                     """
-                    INSERT INTO crawldb.page (url, html_content, http_status_code, page_type_code, content_hash, content_minhash) 
-                    VALUES (%s, %s, %s, 'HTML', %s) RETURNING id
+                    INSERT INTO crawldb.page (site_id, url, html_content, http_status_code, page_type_code, content_hash, content_minhash) 
+                    VALUES (%s, %s, %s, %s, 'HTML', %s, %s) RETURNING id
                     """,
-                    (url, html_content, status_code, content_hash, content_minhash)
+                    (site_id, url, html_content, status_code, content_hash, content_minhash)
                 )
                 page_id = cursor.fetchone()[0]
             
@@ -409,23 +418,23 @@ class Database:
             cursor.close()
     
     def check_content_hash_exists(self, content_hash):
-        """Check if content hash exists in database, return first page with this hash (oldest)"""
+        """Check if content hash exists in database"""
         cursor = self.conn.cursor()
         try:
             cursor.execute("""
                 SELECT id, url 
                 FROM crawldb.page 
-                WHERE content_hash = %s AND page_type_code = 'HTML'
-                ORDER BY accessed_time ASC
+                WHERE content_hash = %s 
+                AND content_hash IS NOT NULL
+                AND id != (SELECT MAX(id) FROM crawldb.page WHERE content_hash = %s)
+                ORDER BY id ASC
                 LIMIT 1
-            """, (content_hash,))
+            """, (content_hash, content_hash))
             
             result = cursor.fetchone()
             if result:
+                print(f"Found HASH duplicate: {result[1]}")
                 return result[0], result[1]  # id, url
-            return None, None
-        except Exception as e:
-            print(f"Error checking content hash: {e}")
             return None, None
         finally:
             cursor.close()
@@ -451,7 +460,28 @@ class Database:
             return None, None
         finally:
             cursor.close()
-    
+    def get_duplicate_page_by_minhash_hex(self, minhash_hex):
+        """Check for duplicate based on minhash"""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT id, url 
+                FROM crawldb.page 
+                WHERE content_minhash = %s
+                AND content_minhash IS NOT NULL
+                AND id != (SELECT MAX(id) FROM crawldb.page WHERE content_minhash = %s)
+                ORDER BY id ASC
+                LIMIT 1
+            """, (minhash_hex, minhash_hex))
+            
+            result = cursor.fetchone()
+            if result:
+                print(f"Found MINHASH duplicate: {result[1]}")
+                return result[0], result[1]
+            return None, None
+        finally:
+            cursor.close()
+
     def update_site_sitemap(self, domain, sitemap_content):
         """Update site with sitemap content"""
         cursor = self.conn.cursor()
@@ -522,15 +552,24 @@ class Database:
         finally:
             cursor.close()
     
-    def mark_page_as_processed(self, url, new_type='PROCESSED'):
-        """Mark a page as processed even if it wasn't crawled"""
+    def mark_page_as_processed(self, url, new_type='HTML'):
+        """Mark a page as processed with a valid page type"""
         cursor = self.conn.cursor()
         try:
+            # Get valid page types
+            cursor.execute("SELECT code FROM crawldb.page_type")
+            valid_types = [row[0] for row in cursor.fetchall()]
+            
+            # If the requested type is not valid, default to HTML
+            if new_type not in valid_types:
+                print(f"Warning: '{new_type}' is not a valid page type. Using 'HTML' instead.")
+                new_type = 'HTML'  # Should be a valid type in most schemas
+                
             cursor.execute(
                 """
                 UPDATE crawldb.page 
                 SET page_type_code = %s, accessed_time = NOW()
-                WHERE url = %s AND page_type_code = 'FRONTIER'
+                WHERE url = %s
                 """,
                 (new_type, url)
             )
@@ -541,7 +580,7 @@ class Database:
             return False
         finally:
             cursor.close()
-    
+               
     def remove_sitemap_urls_from_frontier(self):
         """Remove sitemap files from frontier to prevent loops"""
         cursor = self.conn.cursor()
@@ -567,16 +606,21 @@ class Database:
 
     def validate_and_clean_domain(self, domain):
         """Clean up and validate domain format before storing"""
+        # Handle empty domain
+        if not domain:
+            return None
+            
         # Remove any protocol prefix if present
         if domain.startswith(("http://", "https://")):
             parsed = urlparse(domain)
-            domain = parsed.netloc
+            # Keep the scheme + netloc, not just netloc
+            domain = f"{parsed.scheme}://{parsed.netloc}"
         
-        # Check for invalid domains (email addresses, empty strings, etc)
+        # Check for invalid domains
         if not domain or '@' in domain or domain == '://' or len(domain) < 3:
             print(f"Skipping invalid domain: {domain}")
             return None
-            
+        
         return domain
 
     def cleanup_invalid_sites(self):
@@ -671,5 +715,23 @@ class Database:
                     print(f"  - {url}")
                     
             return len(found_urls)
+        finally:
+            cursor.close()
+
+    def get_frontier_batch(self, limit=1000):
+        """Get a batch of URLs from the frontier"""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT url, priority FROM crawldb.page 
+                WHERE page_type_code = 'FRONTIER'
+                ORDER BY priority ASC, id ASC
+                LIMIT %s
+            """, (limit,))
+            
+            return [(row[0], row[1] or 0) for row in cursor.fetchall()]
+        except Exception as e:
+            print(f"Error retrieving frontier batch: {e}")
+            return []
         finally:
             cursor.close()
