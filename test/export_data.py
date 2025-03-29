@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 # Add the parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from database import Database
+from DEVELOPMENT.database import Database
 
 def extract_content_samples():
     """Extract one example of each content type from the database"""
