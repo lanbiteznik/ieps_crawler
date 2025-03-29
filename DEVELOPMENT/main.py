@@ -1,9 +1,9 @@
 import concurrent.futures
-from crawler import Crawler
+from DEVELOPMENT.crawler import Crawler
 import argparse
 import time
 from datetime import datetime
-from database import Database
+from DEVELOPMENT.database import Database
 
 def run_worker(seed_urls, max_pages, worker_id, keywords=None):
     try:
@@ -51,7 +51,7 @@ def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
     print(f"Preferential keywords: {crawl_keywords}")
     print(f"Total target: {total_pages} pages")
     print(f"Starting time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    from database import Database
+    from DEVELOPMENT.database import Database
     db = Database()
     invalid_count = db.cleanup_invalid_sites()
     if invalid_count > 0:

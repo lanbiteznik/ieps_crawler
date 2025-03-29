@@ -2,7 +2,7 @@ from datetime import datetime
 import re
 import requests
 from urllib.parse import urlparse, urljoin, urlunparse
-from database import Database
+from DEVELOPMENT.database import Database
 import time
 import hashlib
 import robotexclusionrulesparser
@@ -15,7 +15,7 @@ import heapq
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import CountVectorizer
 #todo scroll 5000 html pages. 
-
+import base64
 class CustomRobotsParser:
     """Wrapper for robotexclusionrulesparser with additional attributes"""
     def __init__(self):
@@ -310,15 +310,17 @@ class Crawler:
         content = self.preprocess_html(html_content)
         minhash = MinHash()
         
-        # Tokenize the content (you can use words, n-grams, etc.)
+        # Tokenize the content
         tokens = content.split()
         
         # Update MinHash with the tokens
         for token in tokens:
             minhash.update(token.encode('utf8'))
         
-        self.min_hash_cache.add(minhash)
-        return minhash
+        hashable_minhash =  base64.b64encode(minhash.digest().tobytes()).decode("utf-8") 
+        self.min_hash_cache.add(hashable_minhash) 
+        print(f"  MinHash signature hashable minhash: {hashable_minhash}")
+        return hashable_minhash
     
     def preprocess_html(self, html_content):
         # Parse HTML and extract meaningful text
