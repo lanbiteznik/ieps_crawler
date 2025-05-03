@@ -2,7 +2,7 @@ from datetime import datetime
 import re
 import requests
 from urllib.parse import urlparse, urljoin, urlunparse
-from DEVELOPMENT.database import Database
+from database import Database
 import time
 import hashlib
 import robotexclusionrulesparser
@@ -88,19 +88,72 @@ class CustomRobotsParser:
         return most_specific_rule == 'allow'
 
 class Crawler:
-    def __init__(self, seed_urls, max_pages=100):
+    def __init__(self, seed_urls, max_pages=100, worker_id=None):
         self.db = Database()
         self.frontier = seed_urls.copy()
-        self.visited = set()
+        self.worker_id = worker_id
+        self.visited = self.load_visited_urls()  # Load visited URLs from database
+        self.target_pages = max_pages
         self.max_pages = max_pages
         self.user_agent = "fri-wier-FTL"
         self.headers = {'User-Agent': self.user_agent}
         self.robots_cache = {}  # Cache for robots.txt
-        self.min_hash_cache = set() 
+        self.min_hash_cache = set()
         
+        # Only count pages crawled by this worker
+        already_crawled = self.count_worker_pages()
+        print(f"Worker {self.worker_id} has crawled {already_crawled} pages")
+        if already_crawled < self.target_pages:
+            self.max_pages = self.target_pages - already_crawled
+            print(f"Will crawl {self.max_pages} more pages to reach target of {self.target_pages}")
+        else:
+            print(f"Worker {self.worker_id} has already reached its target of {self.target_pages} pages!")
+            self.max_pages = 0
+        
+    def count_worker_pages(self):
+        """Count pages crawled by this worker"""
+        if self.worker_id is None:
+            return 0
+            
+        cursor = self.db.conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM crawldb.page 
+                WHERE page_type_code != 'FRONTIER'
+                AND worker_id = %s
+            """, (self.worker_id,))
+            count = cursor.fetchone()[0]
+            return count
+        finally:
+            cursor.close()
+    
+    def load_visited_urls(self):
+        """Load already visited URLs from the database"""
+        visited = set()
+        cursor = self.db.conn.cursor()
+        try:
+            # Get all URLs that have been successfully crawled (not FRONTIER)
+            cursor.execute("""
+                SELECT url 
+                FROM crawldb.page 
+                WHERE page_type_code != 'FRONTIER'
+            """)
+            for (url,) in cursor.fetchall():
+                visited.add(url)
+            print(f"Loaded {len(visited)} visited URLs from database")
+            return visited
+        finally:
+            cursor.close()
+    
     def start(self):
         # Add seed URLs to frontier pages in database
         print(f"Worker starting - Adding {len(self.frontier)} seed URLs to frontier")
+        
+        # Check if we've already reached our target
+        if self.max_pages <= 0:
+            print("Already reached or exceeded target number of pages. No additional crawling needed.")
+            return
         
         # Remove sitemap URLs that might cause infinite loops
         if hasattr(self.db, 'remove_sitemap_urls_from_frontier'):
@@ -110,7 +163,9 @@ class Crawler:
             success = self.db.add_page_to_frontier(url, priority=0)
             print(f"Added {url} to frontier: {success}")
         
-        print("Starting crawling process...")
+        print(f"Starting crawling process for {self.max_pages} additional pages...")
+        print(f"Current progress: {len(self.visited)}/{self.target_pages} pages")
+        
         pages_crawled = 0
         empty_frontier_count = 0  # Track consecutive empty frontier results
         
@@ -140,7 +195,8 @@ class Crawler:
                 print(f"Skipping already visited URL: {next_url}")
                 continue
                     
-            print(f"Crawling ({pages_crawled+1}/{self.max_pages}): {next_url}")
+            total_crawled = len(self.visited) + pages_crawled
+            print(f"Crawling ({total_crawled + 1}/{self.target_pages}): {next_url}")
             self.crawl_page(next_url)
             self.visited.add(next_url)
             pages_crawled += 1
@@ -153,7 +209,9 @@ class Crawler:
                 print(f"Sleeping for {delay} seconds (per robots.txt)...")
                 time.sleep(delay)
         
-        print(f"Worker finished after crawling {pages_crawled} pages")
+        final_count = len(self.visited)
+        print(f"Worker finished after crawling {pages_crawled} additional pages")
+        print(f"Total pages crawled: {final_count}/{self.target_pages}")
     
     def priority(self, link_tag):
         """
@@ -887,3 +945,38 @@ class Crawler:
                 
             # Add to frontier with priority
             self.db.add_page_to_frontier(url, priority)
+
+    def update_page_with_worker_id(self, url, html_content, status_code, content_hash=None, content_minhash=None):
+        """Update page with worker ID"""
+        cursor = self.db.conn.cursor()
+        try:
+            if content_hash and content_minhash:
+                cursor.execute("""
+                    UPDATE crawldb.page 
+                    SET html_content = %s,
+                        http_status_code = %s,
+                        accessed_time = NOW(),
+                        page_type_code = 'HTML',
+                        worker_id = %s,
+                        content_hash = %s,
+                        content_minhash = %s
+                    WHERE url = %s
+                    RETURNING id
+                """, (html_content, status_code, self.worker_id, content_hash, content_minhash, url))
+            else:
+                cursor.execute("""
+                    UPDATE crawldb.page 
+                    SET html_content = %s,
+                        http_status_code = %s,
+                        accessed_time = NOW(),
+                        page_type_code = 'HTML',
+                        worker_id = %s
+                    WHERE url = %s
+                    RETURNING id
+                """, (html_content, status_code, self.worker_id, url))
+            
+            result = cursor.fetchone()
+            self.db.conn.commit()
+            return result[0] if result else None
+        finally:
+            cursor.close()

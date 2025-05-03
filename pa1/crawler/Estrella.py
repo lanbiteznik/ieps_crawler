@@ -12,7 +12,7 @@ import urllib.robotparser
 from bs4 import BeautifulSoup
 from threading import Thread, Lock
 from datetime import datetime
-from Connection import PostgresDB as BabaVangaDB
+from Connection import PostgresDB
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from sklearn.feature_extraction.text import CountVectorizer
@@ -24,7 +24,8 @@ from urllib.parse import urljoin
 import xml.etree.ElementTree as ET
 
 dotenv.load_dotenv()
-db_name = os.getenv("DB_NAME")
+# Override database name to use VectorDB01
+db_name = "VectorDB01"
 db_user = os.getenv("DB_USER")
 db_password = os.getenv("DB_PASSWORD")
 db_host = os.getenv("DB_HOST")
@@ -115,7 +116,7 @@ class MinHash:
 class Estrella:
     def __init__(self, domain, workers=4, max_pages=5000):
         print(f"Initializing Estrella with URL: {domain}, max_depth: {workers}, max_pages: {max_pages}")
-        self.domain = domain
+        self.domain = domain.rstrip('/')  # Ensure no trailing slash
         self.workers = workers
         self.max_pages = max_pages
         self.page_count = 0
@@ -131,15 +132,19 @@ class Estrella:
         self.queue = []
         self.page_hashes = set()
         self.minhash_dict = {}
-        heapq.heappush(self.queue, (0, domain))
 
         self.init_db()
+        self.load_visited_urls()  # Load previously visited URLs
         self.init_robots_parser()
         self.init_sitemap_parser()
         self.minhasher = MinHash(num_hashes=200)
+        
+        # Initialize queue with unvisited URLs
+        self.seed_initial_urls()
+        print(f"Initial queue size: {len(self.queue)}")
 
     def init_db(self):
-        self.db = BabaVangaDB(db_name, db_user, db_password, db_host, db_port)
+        self.db = PostgresDB(db_name, db_user, db_password, db_host, db_port)
         self.db.connect()
         self.db._init_schema()
 
@@ -176,11 +181,34 @@ class Estrella:
         return url.startswith(self.domain)
     
     def crawl(self):
+        """Main crawling method"""
+        # First check if the domain is allowed by robots.txt
+        if not self.is_url_allowed_in_robots(self.domain):
+            print(f"Domain {self.domain} is not allowed by robots.txt")
+            return
 
-        if self.is_url_allowed_in_robots(self.domain):
-            self.site_id = self.db.insert_site(self.domain, self.robots_content, str(self.sitemap_content))
-            heapq.heappush(self.queue, (0, self.domain))
+        # Get or create site ID
+        try:
+            # Try to get existing site ID first
+            self.cursor = self.db.conn.cursor()
+            self.cursor.execute("SELECT id FROM crawldb.site WHERE domain = %s", (self.domain,))
+            result = self.cursor.fetchone()
+            
+            if result:
+                self.site_id = result[0]
+                print(f"Found existing site ID: {self.site_id}")
+            else:
+                # If site doesn't exist, create new one
+                self.site_id = self.db.insert_site(self.domain, self.robots_content, str(self.sitemap_content))
+                print(f"Created new site with ID: {self.site_id}")
+        except Exception as e:
+            print(f"Error getting/creating site: {e}")
+            return
+        finally:
+            if hasattr(self, 'cursor') and self.cursor:
+                self.cursor.close()
 
+        # Start crawler threads
         threads = []
         for _ in range(self.workers):
             thread = Thread(target=self.crawl_next_page)
@@ -400,21 +428,37 @@ class Estrella:
         return 1 - highest_similarity
     
     def crawl_next_page(self):
-
         chrome_options = Options()
         chrome_options.add_argument("--headless")
         driver = webdriver.Chrome(options=chrome_options)
 
-        while self.queue and self.page_count < self.max_pages:
-            print("Pagenumber:", self.page_count)
-            with self.lock:
+        remaining_pages = self.max_pages - self.page_count
+        print(f"Starting crawler thread. Remaining pages to crawl: {remaining_pages}")
+
+        while remaining_pages > 0:
+            # If queue is empty, try to find more URLs
+            if not self.queue:
+                print("Queue is empty, trying to find more URLs...")
+                self.seed_initial_urls()
                 if not self.queue:
-                    continue
+                    print("No more URLs found, exiting thread")
+                    break
+
+            print(f"Page count: {self.page_count}/{self.max_pages} (Queue size: {len(self.queue)})")
+            
+            with self.lock:
+                if not self.queue or self.page_count >= self.max_pages:
+                    break
                 priority, url = heapq.heappop(self.queue)
+                self.urls_in_queue.remove(url)
 
             if not self.in_domain(url) or url in self.visited_urls:
                 continue
-            self.visited_urls.add(url)
+
+            with self.lock:
+                if self.page_count >= self.max_pages:
+                    break
+                self.visited_urls.add(url)
 
             time.sleep(5)  
 
@@ -431,7 +475,7 @@ class Estrella:
                 html_content = driver.page_source
                 page_type, processed_content = self.detect_page_data_type(url, html_content, driver)
                 
-                if page_type == "DUPLICATE":#should i just skip?
+                if page_type == "DUPLICATE":
                     continue  
 
                 page_id = self.db.insert_page(site_id=self.site_id,
@@ -442,32 +486,56 @@ class Estrella:
                                         accessed_time=datetime.now())
 
                 if page_type == "HTML":
-                    self.page_count += 1
+                    with self.lock:
+                        self.page_count += 1
+                        remaining_pages = self.max_pages - self.page_count
+                        if remaining_pages <= 0:
+                            break
+                    
                     images = self.extract_images(html_content, url)
                     for filename, content_type, image_data in images:
                         self.db.insert_image(page_id, filename, content_type, image_data, datetime.now())
                     self.extract_binary_files_from_html(page_id, html_content)
 
+                    # Extract and add new links to queue
+                    url_parts = urlsplit(url)
+                    base_url = url_parts.scheme + "://" + url_parts.netloc
+                    links = self.extract_links(html_content, base_url)
+                    print(f"  - Found {len(links)} links")
+
+                    # Try to find links in JavaScript onclick events and other attributes
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    onclick_links = []
+                    for tag in soup.find_all(onclick=True):
+                        onclick_text = tag['onclick']
+                        urls = re.findall(r'(?:window\.location|location\.href)\s*=\s*[\'"]([^\'"]+)[\'"]', onclick_text)
+                        onclick_links.extend(urls)
+                    
+                    # Add onclick links to the regular links
+                    for onclick_url in onclick_links:
+                        full_url = urljoin(base_url, onclick_url)
+                        if self.in_domain(full_url):
+                            links.append((full_url, None))
+
+                    for link, link_tag in links:
+                        if link not in self.visited_urls and link not in self.urls_in_queue and self.in_domain(link):
+                            priority = self.priority(html_content, link, link_tag) if link_tag else 0.5
+                            print(f"  - Link added to queue {link}, Priority: {priority}")
+                            with self.lock:
+                                heapq.heappush(self.queue, (priority, link))
+                                self.urls_in_queue.add(link)
+
                 elif page_type == "BINARY":
                     self.db.insert_page_data(page_id, "BINARY")
 
-                url_parts = urlsplit(url)
-                base_url = url_parts.scheme + "://" + url_parts.netloc
-                links = self.extract_links(html_content, base_url)
-                print(f"  - Found {len(links)} links")
-
-                for link, link_tag in links:
-                    if link not in self.visited_urls and self.in_domain(link):
-                        priority = self.priority(html_content, link, link_tag)
-                        if link not in self.urls_in_queue:
-                            print(f"  - Link added to queue {link}, Priority: {priority}")
-                            self.urls_in_queue.add(link)
-                            heapq.heappush(self.queue, (priority, link))
-
             except Exception as e:
-                print("Error crawling:", e)
+                print(f"Error crawling {url}:", e)
+                with self.lock:
+                    if url in self.visited_urls:
+                        self.visited_urls.remove(url)
 
-        driver.quit() 
+        driver.quit()
+        print(f"Crawler thread finished. Final page count: {self.page_count}")
 
     def compare_minhash_signature(self, minhash1, minhash2):
         """Compute Jaccard similarity using MinHash signatures."""
@@ -494,6 +562,93 @@ class Estrella:
         print(f"Page {page_id} added to the database.")
         return False 
     
+    def load_visited_urls(self):
+        """Load previously visited URLs from the database."""
+        try:
+            # Get all URLs from the database
+            urls = self.db.get_all_urls()
+            self.visited_urls.update(urls)
+            self.page_count = len(self.visited_urls)
+            print(f"Loaded {self.page_count} previously visited URLs from database")
+        except Exception as e:
+            print(f"Error loading visited URLs: {e}")
+
+    def seed_initial_urls(self):
+        """Find and add new URLs to crawl that haven't been visited yet."""
+        print("Seeding initial URLs...")
+        
+        # 1. Try homepage first
+        if self.domain not in self.visited_urls:
+            heapq.heappush(self.queue, (0, self.domain))
+            self.urls_in_queue.add(self.domain)
+            print(f"Added domain to queue: {self.domain}")
+
+        # 2. Try to get URLs from homepage
+        try:
+            print("Fetching URLs from homepage...")
+            response = requests.get(self.domain, headers=self.header, timeout=10)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                links = soup.find_all('a', href=True)
+                for link in links:
+                    url = urljoin(self.domain, link['href'])
+                    if (url not in self.visited_urls and 
+                        url not in self.urls_in_queue and 
+                        self.in_domain(url)):
+                        heapq.heappush(self.queue, (0, url))
+                        self.urls_in_queue.add(url)
+                        print(f"Added URL from homepage: {url}")
+        except Exception as e:
+            print(f"Error fetching homepage: {e}")
+
+        # 3. Try common paths that might exist
+        common_paths = [
+            "/en",
+            "/sl",
+            "/about",
+            "/o-fakulteti",
+            "/studij",
+            "/raziskovanje",
+            "/en/about",
+            "/en/study",
+            "/en/research",
+            "/novice",
+            "/news",
+            "/events",
+            "/dogodki",
+            "/contact",
+            "/kontakt"
+        ]
+        
+        for path in common_paths:
+            url = urljoin(self.domain, path)
+            if (url not in self.visited_urls and 
+                url not in self.urls_in_queue and 
+                self.in_domain(url)):
+                heapq.heappush(self.queue, (0, url))
+                self.urls_in_queue.add(url)
+                print(f"Added common path: {url}")
+
+        # 4. Try sitemap again with more paths
+        sitemap_fetcher = SitemapFetcher(self.domain)
+        sitemap_fetcher.fetch_sitemap()
+        sitemap_urls = sitemap_fetcher.extract_urls()
+        
+        if sitemap_urls:
+            print(f"Found {len(sitemap_urls)} URLs in sitemap")
+            for url in sitemap_urls:
+                if (url not in self.visited_urls and 
+                    url not in self.urls_in_queue and 
+                    self.in_domain(url)):
+                    heapq.heappush(self.queue, (0, url))
+                    self.urls_in_queue.add(url)
+                    print(f"Added URL from sitemap: {url}")
+
+        if not self.queue:
+            print("WARNING: Could not find any new URLs to crawl!")
+        else:
+            print(f"Successfully added {len(self.queue)} new URLs to crawl")
+
 if __name__ == "__main__":
     url = "https://www.fri.uni-lj.si/"  
     workers = 6

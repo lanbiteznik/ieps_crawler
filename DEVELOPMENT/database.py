@@ -30,6 +30,8 @@ class Database:
             
             # Ensure schema and tables are properly set up
             self._init_schema()
+            print("Database connection established and schema initialized")
+            print("COnnected to database:", db_name)
         except Exception as e:
             print(f"Database connection error: {e}")
             raise
@@ -78,6 +80,21 @@ class Database:
                     ALTER TABLE crawldb.page ADD CONSTRAINT fk_duplicate_page FOREIGN KEY (duplicate_id) 
                         REFERENCES crawldb.page(id);
                 """)
+
+            # Add priority column if it doesn't exist
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_schema = 'crawldb' 
+                AND table_name = 'page' 
+                AND column_name = 'priority'
+            """)
+            if not cursor.fetchone():
+                print("Adding priority column to page table...")
+                cursor.execute("""
+                    ALTER TABLE crawldb.page ADD COLUMN priority FLOAT DEFAULT 0;
+                """)
+                
         except Exception as e:
             print(f"Error initializing schema: {e}")
         finally:
@@ -193,47 +210,26 @@ class Database:
         """Get next page from frontier with preference for URLs containing keywords"""
         cursor = self.conn.cursor()
         try:
-            # First check if we have preferential keywords defined
-            if hasattr(self, 'preferential_keywords') and self.preferential_keywords:
-                # Try to find pages matching our keywords first
-                for keyword in self.preferential_keywords:
-                    try:
-                        # Look for keyword in URL
-                        cursor.execute("""
-                            SELECT url FROM crawldb.page 
-                            WHERE page_type_code = 'FRONTIER'
-                            AND url NOT LIKE '%sitemap%.xml%'
-                            AND url NOT LIKE '%/assets/sitemap/%'
-                            AND url ILIKE %s
-                            LIMIT 1
-                        """, (f'%{keyword}%',))
-                        
-                        result = cursor.fetchone()
-                        if result is not None and len(result) > 0:  # Explicitly check for None and length
-                            print(f"Found preferential URL matching keyword '{keyword}': {result[0]}")
-                            return result[0]
-                    except Exception as e:
-                        print(f"Error looking for keyword '{keyword}': {e}")
-
-            try:
-                # If no preferential match found, get URL with highest priority
-                cursor.execute("""
-                    SELECT url FROM crawldb.page 
-                    WHERE page_type_code = 'FRONTIER'
-                    AND url NOT LIKE '%sitemap%.xml%'
-                    AND url NOT LIKE '%/assets/sitemap/%'
-                    ORDER BY priority ASC
-                    LIMIT 1
-                """)
-                result = cursor.fetchone()
-                if result is not None and len(result) > 0:  # Explicit length check
-                    return result[0]
-                return None
-            except Exception as e:
-                print(f"Error retrieving any frontier page: {e}")
-                return None
+            # Get a URL that hasn't been marked as processed yet, ordered by priority
+            cursor.execute("""
+                SELECT p.url 
+                FROM crawldb.page p 
+                WHERE p.page_type_code = 'FRONTIER' 
+                AND p.url NOT IN (
+                    SELECT url 
+                    FROM crawldb.page 
+                    WHERE page_type_code != 'FRONTIER'
+                )
+                ORDER BY p.priority ASC, p.id ASC
+                LIMIT 1
+            """)
+            
+            result = cursor.fetchone()
+            if result:
+                return result[0]
+            return None
         except Exception as e:
-            print(f"Database error getting frontier page: {e}")
+            print(f"Error retrieving frontier page: {e}")
             return None
         finally:
             cursor.close()

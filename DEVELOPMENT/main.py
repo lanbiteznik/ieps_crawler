@@ -1,9 +1,22 @@
 import concurrent.futures
-from DEVELOPMENT.crawler import Crawler
+import sys
+import os
+
+# Add the current directory to the Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+# Add the parent directory to the Python path
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
+from crawler import Crawler
 import argparse
 import time
 from datetime import datetime
-from DEVELOPMENT.database import Database
+from database import Database
 
 def run_worker(seed_urls, max_pages, worker_id, keywords=None):
     try:
@@ -24,7 +37,7 @@ def run_worker(seed_urls, max_pages, worker_id, keywords=None):
         print(f"Worker {worker_id} encountered an error: {e}")
         return f"Worker {worker_id} failed: {str(e)}"
     
-def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
+def main(num_workers=4, max_pages_per_worker=5000, debug_mode=False):
     # Calculate total target pages
     total_pages = num_workers * max_pages_per_worker
     
@@ -107,8 +120,8 @@ def main(num_workers=4, max_pages_per_worker=1250, debug_mode=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run web crawler with multiple workers')
-    parser.add_argument('--workers', type=int, default=4, help='Number of worker processes')
-    parser.add_argument('--max-pages', type=int, default=1250, help='Max pages per worker')
+    parser.add_argument('--workers', type=int, default=1, help='Number of worker processes')
+    parser.add_argument('--max-pages', type=int, default=5000, help='Max pages per worker')
     parser.add_argument('--debug', action='store_true', help='Run in debug mode with fewer pages')
     args = parser.parse_args()
     

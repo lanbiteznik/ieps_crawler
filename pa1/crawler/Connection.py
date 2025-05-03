@@ -4,7 +4,7 @@ import dotenv
 import os
 
 dotenv.load_dotenv()
-db_name = os.getenv("DB_NAME")
+db_name = "VectorDB01"
 db_user = os.getenv("DB_USER")
 db_password = os.getenv("DB_PASSWORD")
 db_host = os.getenv("DB_HOST")
