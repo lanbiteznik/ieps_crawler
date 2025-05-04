@@ -7,7 +7,6 @@ from psycopg2.extras import RealDictCursor
 import sys
 import os
 
-# Add the parent directory to sys.path to find the modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
@@ -15,10 +14,6 @@ sys.path.append(parent_dir)
 from vector_processor import VectorProcessor
 from html_cleaner import HTMLCleaner
 
-# Load environment variables
-def get_env_variable(var_name: str, default_value: Optional[str] = None) -> str:
-    """Get environment variable or return default value."""
-    return os.getenv(var_name, default_value)
 
 dotenv.load_dotenv(override=True)
 db_name = os.getenv("DB_NAME", "VectorDB01")
@@ -64,12 +59,10 @@ class VectorDBQuerier:
             List of matching segments with their metadata and similarity scores
         """
         try:
-            # Generate embedding for the query
             query_embedding = self.vector_processor.create_embedding(query)
             
             cursor = self.connection.cursor()
             
-            # Query for similar content using pgvector <=> operator (cosine distance)
             cursor.execute("""
     SELECT 
         ps.id AS segment_id,
@@ -149,7 +142,6 @@ class VectorDBQuerier:
             cursor = self.connection.cursor()
             
             if query:
-                # If query provided, use semantic search within URL pattern
                 query_embedding = self.vector_processor.create_embedding(query)
                 
                 cursor.execute("""
@@ -170,7 +162,6 @@ class VectorDBQuerier:
                     LIMIT %s;
                 """, (query_embedding, f"%{url_pattern}%", limit))
             else:
-                # Otherwise just get content from matching URLs
                 cursor.execute("""
                     SELECT 
                         ps.id AS segment_id,
@@ -257,7 +248,6 @@ def display_results(results: List[Dict[str, Any]], show_similarity: bool = True)
         if 'combined_score' in result:
             print(f"Combined Score: {result['combined_score']:.4f}")
             
-        # Format and truncate text if too long
         text = result['page_segment']
         if len(text) > 300:
             text = text[:297] + "..."
@@ -281,13 +271,11 @@ def main():
     #args.url = "https://www.fri.uni-lj.si/sl/raziskave/raziskovalni-projekti"
     args.hybrid = True
     
-    # Initialize components
     vector_processor = VectorProcessor()
     querier = VectorDBQuerier(vector_processor)
     
     try:
         if args.page is not None:
-            # Get specific page content
             url, content = querier.get_page_content(args.page)
             if url and content:
                 print(f"\n=== Content for page {args.page} ===")

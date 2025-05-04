@@ -48,23 +48,19 @@ class HTMLCleaner:
 
         soup = BeautifulSoup(html, "html.parser")
         
-        # Extract breadcrumbs
         breadcrumbs_text = None
         breadcrumbs = soup.select_one(".breadcrumbs")
         if breadcrumbs:
             breadcrumbs_text = breadcrumbs.get_text(separator=" ", strip=True)
             breadcrumbs.decompose()
 
-        # Get main content
         content = soup.select_one(".block.block-system")
         used_block = bool(content)
         content = content if content else soup
 
-        # Remove unwanted elements
         for tag in content(["script", "style", "header", "footer", "nav"]):
             tag.decompose()
 
-        # Extract text blocks
         blocks = content.find_all(
             ["p", "div", "section", "article", "li", "h1", "h2", "h3", "h4"]
         )
@@ -76,20 +72,15 @@ class HTMLCleaner:
                 combined = cls.SUB_PARAGRAPH_BREAK.join(sub_parts)
                 paragraphs.append(combined)
 
-        # Remove duplicates while preserving order
         paragraphs = list(dict.fromkeys(paragraphs))
 
-        # Add breadcrumbs at the start if available
         if breadcrumbs_text:
             paragraphs.insert(0, breadcrumbs_text)
 
         plain_text = cls.PARAGRAPH_BREAK.join(paragraphs).strip()
 
-        # Return None if only whitespace remains
         if not plain_text.strip():
             return None, used_block
-
-        # Filter out unwanted content
         text_lower = plain_text.lower()
         if any(phrase in text_lower for phrase in [
             "page does not exist",

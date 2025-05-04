@@ -22,16 +22,12 @@ conn.autocommit = True
 
 from pgvector.psycopg2 import register_vector
 
-# Create a cursor
 cur = conn.cursor()
 
-# Enable pgvector extension
 cur.execute('CREATE EXTENSION IF NOT EXISTS vector')
 
-# Register the vector type for this connection
 register_vector(conn)
 
-# Commit changes and close
 conn.commit()
 cur.close()
 conn.close()

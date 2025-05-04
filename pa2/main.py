@@ -57,7 +57,6 @@ def main():
         html_cleaner = HTMLCleaner()
         vector_processor = VectorProcessor()
         
-        # Connect to database
         conn = DatabaseManager(db_host, db_port, db_name, db_user, db_password).get_connection()
         conn.autocommit = True
         cursor = conn.cursor()
@@ -86,7 +85,6 @@ def main():
             );
         """)
         
-        # Fetch pages that need processing
         print("Fetching pages from database...")
         cursor.execute("""
             SELECT id, url, html_content 
@@ -102,15 +100,12 @@ def main():
         successful_pages = 0
         failed_pages = 0
 
-        # Create progress bar
         with tqdm(total=total_pages, desc="Processing pages", unit="page") as pbar:
             for page in pages:
                 try:
-                    # Clean HTML
                     clean_text, used_block = html_cleaner.clean_html(page['html_content'])
                     
                     if clean_text:
-                        # Store cleaned text
                         cursor.execute("""
                             INSERT INTO crawldb.cleaned_page (id, url, plain_text, block_system)
                             VALUES (%s, %s, %s, %s)
@@ -119,17 +114,14 @@ def main():
                                 block_system = EXCLUDED.block_system;
                         """, (page['id'], page['url'], clean_text, used_block))
                         
-                        # Create segments
                         segments = [
                             {'id': None, 'text': segment.strip()}
                             for segment in clean_text.split(HTMLCleaner.PARAGRAPH_BREAK)
                             if segment.strip()
                         ]
                         
-                        # Process segments and get embeddings
                         processed_segments = vector_processor.process_segments(segments)
                         
-                        # Store segments with embeddings
                         for segment in processed_segments:
                             cursor.execute("""
                                 INSERT INTO crawldb.page_segment (page_id, page_segment, embedding)
@@ -144,7 +136,6 @@ def main():
                 
                 processed_pages += 1
                 
-                # Update progress bar with current stats
                 remaining_time = estimate_completion_time(start_time, processed_pages, total_pages)
                 pbar.set_postfix({
                     'successful': successful_pages,
@@ -153,14 +144,12 @@ def main():
                 })
                 pbar.update(1)
                 
-        # Print final statistics
         total_time = time.time() - start_time
         print(f"\nProcessing completed in {timedelta(seconds=int(total_time))}!")
         print(f"Total pages processed: {total_pages}")
         print(f"Successful: {successful_pages}")
         print(f"Failed: {failed_pages}")
         
-        # Commit changes and cleanup
         conn.commit()
         cursor.close()
         conn.close()
