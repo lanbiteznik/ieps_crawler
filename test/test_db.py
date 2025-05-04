@@ -10,8 +10,8 @@ import dotenv
 # Add parent directory to path so we can import database.py
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from DEVELOPMENT.database import Database
-from DEVELOPMENT.crawler import Crawler
+from oldstufffrompa1.database import Database
+from oldstufffrompa1.crawler import Crawler
 
 # Load environment variables
 dotenv.load_dotenv()

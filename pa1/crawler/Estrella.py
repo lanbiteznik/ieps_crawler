@@ -428,9 +428,18 @@ class Estrella:
         return 1 - highest_similarity
     
     def crawl_next_page(self):
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        driver = webdriver.Chrome(options=chrome_options)
+        driver = None
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--remote-debugging-port=0")
+            driver = webdriver.Chrome(options=chrome_options)
+        except Exception as e:
+            print(f"Error initializing WebDriver: {e}")
+            return
 
         remaining_pages = self.max_pages - self.page_count
         print(f"Starting crawler thread. Remaining pages to crawl: {remaining_pages}")
@@ -468,11 +477,30 @@ class Estrella:
                     continue
 
                 print(f"Crawling URL: {url}, Priority: {priority}")
-                driver.get(url)
-                print("Waiting for page to load... 3s")
-                time.sleep(3)
+                
+                # Try to get the page with WebDriver
+                try:
+                    driver.get(url)
+                    print("Waiting for page to load... 3s")
+                    time.sleep(3)
+                    html_content = driver.page_source
+                except Exception as e:
+                    print(f"WebDriver failed for {url}, trying with requests: {e}")
+                    # Fallback to requests if WebDriver fails
+                    try:
+                        response = requests.get(url, headers=self.header, timeout=10)
+                        html_content = response.text
+                    except Exception as req_e:
+                        print(f"Both WebDriver and requests failed for {url}: {req_e}")
+                        # Try to reinitialize WebDriver
+                        try:
+                            if driver:
+                                driver.quit()
+                            driver = webdriver.Chrome(options=chrome_options)
+                        except Exception as driver_e:
+                            print(f"Failed to reinitialize WebDriver: {driver_e}")
+                        continue
 
-                html_content = driver.page_source
                 page_type, processed_content = self.detect_page_data_type(url, html_content, driver)
                 
                 if page_type == "DUPLICATE":
@@ -533,8 +561,20 @@ class Estrella:
                 with self.lock:
                     if url in self.visited_urls:
                         self.visited_urls.remove(url)
+                # Try to reinitialize WebDriver if it seems to be the issue
+                if "WebDriver" in str(e) or "session" in str(e):
+                    try:
+                        if driver:
+                            driver.quit()
+                        driver = webdriver.Chrome(options=chrome_options)
+                    except Exception as driver_e:
+                        print(f"Failed to reinitialize WebDriver: {driver_e}")
 
-        driver.quit()
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
         print(f"Crawler thread finished. Final page count: {self.page_count}")
 
     def compare_minhash_signature(self, minhash1, minhash2):
@@ -576,6 +616,7 @@ class Estrella:
     def seed_initial_urls(self):
         """Find and add new URLs to crawl that haven't been visited yet."""
         print("Seeding initial URLs...")
+        initial_queue_size = len(self.queue)
         
         # 1. Try homepage first
         if self.domain not in self.visited_urls:
@@ -601,7 +642,70 @@ class Estrella:
         except Exception as e:
             print(f"Error fetching homepage: {e}")
 
-        # 3. Try common paths that might exist
+        # 3. Check the last 20 visited pages for new URLs
+        try:
+            print("Checking recently visited pages for new URLs...")
+            cursor = self.db.conn.cursor()
+            
+            # First get the site ID
+            cursor.execute("SELECT id FROM crawldb.site WHERE domain = %s", (self.domain,))
+            result = cursor.fetchone()
+            if result:
+                site_id = result[0]
+                
+                # Now get recent pages for this site
+                cursor.execute("""
+                    SELECT url, html_content 
+                    FROM crawldb.page 
+                    WHERE page_type_code = 'HTML' 
+                    AND site_id = %s
+                    ORDER BY accessed_time DESC 
+                    LIMIT 20
+                """, (site_id,))
+                
+                recent_pages = cursor.fetchall()
+                print(f"Found {len(recent_pages)} recent pages to check")
+                
+                for page_url, html_content in recent_pages:
+                    if html_content:
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        
+                        # Get regular links
+                        links = soup.find_all('a', href=True)
+                        for link in links:
+                            url = urljoin(page_url, link['href'])
+                            if (url not in self.visited_urls and 
+                                url not in self.urls_in_queue and 
+                                self.in_domain(url)):
+                                heapq.heappush(self.queue, (0, url))
+                                self.urls_in_queue.add(url)
+                                print(f"Added URL from recent page {page_url}: {url}")
+                        
+                        # Get JavaScript links
+                        onclick_links = []
+                        for tag in soup.find_all(onclick=True):
+                            onclick_text = tag['onclick']
+                            urls = re.findall(r'(?:window\.location|location\.href)\s*=\s*[\'"]([^\'"]+)[\'"]', onclick_text)
+                            onclick_links.extend(urls)
+                        
+                        for onclick_url in onclick_links:
+                            url = urljoin(page_url, onclick_url)
+                            if (url not in self.visited_urls and 
+                                url not in self.urls_in_queue and 
+                                self.in_domain(url)):
+                                heapq.heappush(self.queue, (0, url))
+                                self.urls_in_queue.add(url)
+                                print(f"Added JavaScript URL from recent page {page_url}: {url}")
+            else:
+                print("No site found in database for domain:", self.domain)
+                            
+        except Exception as e:
+            print(f"Error checking recent pages: {e}")
+        finally:
+            if cursor:
+                cursor.close()
+
+        # 4. Try common paths that might exist
         common_paths = [
             "/en",
             "/sl",
@@ -629,7 +733,7 @@ class Estrella:
                 self.urls_in_queue.add(url)
                 print(f"Added common path: {url}")
 
-        # 4. Try sitemap again with more paths
+        # 5. Try sitemap again with more paths
         sitemap_fetcher = SitemapFetcher(self.domain)
         sitemap_fetcher.fetch_sitemap()
         sitemap_urls = sitemap_fetcher.extract_urls()
@@ -644,10 +748,11 @@ class Estrella:
                     self.urls_in_queue.add(url)
                     print(f"Added URL from sitemap: {url}")
 
-        if not self.queue:
+        new_urls_added = len(self.queue) - initial_queue_size
+        if new_urls_added == 0:
             print("WARNING: Could not find any new URLs to crawl!")
         else:
-            print(f"Successfully added {len(self.queue)} new URLs to crawl")
+            print(f"Successfully added {new_urls_added} new URLs to crawl")
 
 if __name__ == "__main__":
     url = "https://www.fri.uni-lj.si/"  

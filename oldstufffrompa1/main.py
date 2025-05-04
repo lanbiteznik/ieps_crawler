@@ -64,7 +64,7 @@ def main(num_workers=4, max_pages_per_worker=5000, debug_mode=False):
     print(f"Preferential keywords: {crawl_keywords}")
     print(f"Total target: {total_pages} pages")
     print(f"Starting time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    from DEVELOPMENT.database import Database
+    from oldstufffrompa1.database import Database
     db = Database()
     invalid_count = db.cleanup_invalid_sites()
     if invalid_count > 0:
