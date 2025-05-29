@@ -20,9 +20,12 @@
                         <input type="text" class="form-control" id="question" name="question" required>
                     </div>
                     <div class="form-check mb-4">
-                        <input type="checkbox" class="form-check-input" id="use_rag" name="use_rag">
-                        <label class="form-check-label" for="use_rag">Use RAG</label>
+                        <input type="checkbox" class="form-check-input" id="use_rag" name="use_rag" checked>
+                        <label class="form-check-label" for="use_rag">Use RAG (retrieve relevant documents)</label>
                     </div>
+                    <small class="text-muted mb-3 d-block">
+                        Note: Currently only document retrieval is implemented.
+                    </small>
                     <button type="submit" class="btn btn-primary">Submit</button>
                 </form>
 

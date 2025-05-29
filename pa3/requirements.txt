@@ -1,2 +1,6 @@
-fastapi 
+fastapi
 uvicorn
+openai
+python-dotenv
+psycopg2-binary
+sentence-transformers
