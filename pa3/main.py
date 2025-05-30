@@ -12,6 +12,7 @@ from typing import List, Dict, Any
 import requests  
 import time
 from datetime import datetime
+import re  # Add this import at the top of your file
 
 # Add parent directory to path to import from PA2
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -89,10 +90,12 @@ def generate_answer_with_llm(question: str, context: str = None) -> str:
         if context:
             # For RAG mode: include context in prompt with clear instructions
             prompt = f"""Answer the following question.
-            Provide a direct, concise answer without showing your reasoning process.
+            Provide a direct, concise answer without showing your reasoning process but still giving an explenation.
             Do not include phrases like "Based on the context" or "According to the documents."
             If the answer cannot be found in the context do your best to provide a reasonable answer based on your knowledge.
-            If the question is not in english, answer in the same language as the question.
+            If the question is not in english, check if it could be in slovene and answer in slovene.
+            If the question is not in either language, answer it in the language that it was asked in.
+            Never include any content inside <think> tags.
 
             CONTEXT:
             {context}
@@ -102,7 +105,7 @@ def generate_answer_with_llm(question: str, context: str = None) -> str:
             ANSWER:"""
         else:
             # For direct mode: just the question with improved instructions
-            prompt = f"""Please answer this question directly and concisely:
+            prompt = f"""Please answer and explain this question directly and concisely:
 
             QUESTION: {question}
             
@@ -122,6 +125,9 @@ def generate_answer_with_llm(question: str, context: str = None) -> str:
         
         if response.status_code == 200:
             answer = response.json()["response"].strip()
+            
+            # Remove any content between <think> and </think> tags
+            answer = re.sub(r'<think>.*?</think>', '', answer, flags=re.DOTALL)
             
             # Clean up the answer if it still has formatting issues
             if answer.lower().startswith("answer:"):
