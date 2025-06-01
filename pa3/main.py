@@ -1,4 +1,9 @@
 # main.py
+import sys
+import os
+from pathlib import Path
+# Adds the project root (ieps_crawler) to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -21,8 +26,9 @@ pa2_dir = os.path.join(parent_dir, "pa2", "implementation-extraction")
 sys.path.append(pa2_dir)
 
 # Import from PA2
-from vector_processor import VectorProcessor
-from Vector_db_querier import VectorDBQuerier
+from pa2.implementation_extraction.vector_processor import VectorProcessor
+from pa2.implementation_extraction.Vector_db_querier import VectorDBQuerier
+
 
 # Load environment variables
 dotenv.load_dotenv(override=True)
@@ -55,7 +61,7 @@ def initialize_vector_search():
         print(f"Error initializing vector search: {str(e)}")
         return False
 
-def get_relevant_documents(query: str, limit: int = 3) -> List[Dict[str, Any]]:
+def get_relevant_documents(query: str, limit: int = 7) -> List[Dict[str, Any]]:
     """Retrieve relevant documents for the query."""
     try:
         if not vector_db_querier:
@@ -190,7 +196,9 @@ async def answer_question(request: QuestionRequest):
 
 @app.get("/", response_class=HTMLResponse)
 async def get_form():
-    html_path = Path("templates/index.html")
+    BASE_DIR = Path(__file__).resolve().parent
+    html_path = BASE_DIR / "templates" / "index.html"
+    #html_path = Path("templates/index.html")
     return HTMLResponse(content=html_path.read_text(), status_code=200)
 
 # Add this to test database connection
@@ -202,7 +210,7 @@ async def test_db_connection():
 
 # Add this to test document retrieval
 @app.get("/test-retrieval")
-async def test_retrieval(query: str, limit: int = 3):
+async def test_retrieval(query: str, limit: int = 7):
     if not vector_db_querier and not initialize_vector_search():
         return {"error": "Vector search system is not available"}
     

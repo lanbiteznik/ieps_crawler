@@ -53,7 +53,14 @@ source venv/bin/activate # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
----
+### 4. Install Olamma (If not already installed)
+https://ollama.com/download
+
+```bash
+PS C:\WINDOWS\system32> $headers = @{ "Content-Type" = "application/json" }
+PS C:\WINDOWS\system32> $body = '{"model":"deepseek-r1", "prompt":"Hello, world"}'
+PS C:\WINDOWS\system32> Invoke-WebRequest -Uri "http://localhost:11434/api/generate" -Method POST -Headers $headers -Body $body
+```
 
 ## Running the Application
 
